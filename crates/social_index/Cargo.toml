@@ -1,0 +1,16 @@
+[package]
+name = "social_index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+tinyindex.workspace = true
+tokenize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

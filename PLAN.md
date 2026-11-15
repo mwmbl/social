@@ -316,6 +316,22 @@ approach, we find the document in the index and re-tokenise it.
    Add a `tombstones` row. Search results filter it out straight away, and the sweep removes
    any copies that remain.
 
+**Lifecycle deletes and `forget` always add a tombstone, even when the lookup found the
+record.** An edit whose `uri:` lookup missed leaves copies of the old version under keys the
+new version doesn't have. A delete that finds the new version can't see those, so without the
+tombstone the old text would stay searchable until the sweep revalidated it. The tombstone
+filters it at once and the sweep removes it. Deletes found by revalidation don't need one: the
+stale copies they can't see have an old `checked` and get revalidated themselves.
+
+**Revalidation** hands back the stored record. If the object is live and consented, the writer
+calls `replace(old, fresh)`: when the keys are unchanged, the add overwrites every copy in
+place (merging dedupes by URI and term); otherwise the old copies are removed first.
+
+Implemented in `social_index`: `SocialIndex::{add, find, delete, delete_record, upsert,
+replace}`, `Tombstones` (objects, authors, domains with subdomains), and `sweep_page`. A seeded
+property test (`social_index/tests/deletion.rs`) checks that deleted documents leave no copy on
+any page, including on crowded indexes where `uri:` lookups miss.
+
 **Sweep** (also how the weekly revalidation the spec requires is done):
 
 - A background task walks every page of each index in a cycle, aiming to finish one pass in
