@@ -299,7 +299,9 @@ impl Exchange<'_> {
                 source,
             })?;
         let status = response.status();
-        if status.as_u16() != 201 {
+        // The spec says 201, but Mastodon 4.7.5 answers 200 (its controller renders with the
+        // default status), so any 2xx with a valid body is a registration.
+        if !status.is_success() {
             return Err(RegistrationError::Status {
                 url: url.to_string(),
                 status: status.as_u16(),

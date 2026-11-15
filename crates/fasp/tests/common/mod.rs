@@ -77,7 +77,8 @@ impl FakeMastodon {
             fasp_id: "dfkl3msw6ps3".to_owned(),
             nodeinfo: Mutex::new(vec![("2.0".into(), doc.clone()), ("2.1".into(), doc)]),
             registered: Mutex::new(None),
-            registration_status: AtomicU16::new(201),
+            // Mastodon 4.7.5 answers 200 where the spec says 201.
+            registration_status: AtomicU16::new(200),
             requests: Mutex::new(Vec::new()),
             subscription_bodies: Mutex::new(Vec::new()),
             backfill_bodies: Mutex::new(Vec::new()),
@@ -213,12 +214,12 @@ async fn fake_dispatch(State(inner): State<Arc<FakeInner>>, request: Request) ->
     }
     if path == "/api/fasp/registration" && method == "POST" {
         let status = inner.registration_status.load(Ordering::SeqCst);
-        if status != 201 {
+        if status != 200 && status != 201 {
             return json_response(status, &json!({"error": "no"}));
         }
         *inner.registered.lock().unwrap() = serde_json::from_slice(&body).ok();
         return json_response(
-            201,
+            status,
             &json!({
                 "faspId": inner.fasp_id,
                 "publicKey": inner.key.verifying_key().to_base64(),

@@ -217,6 +217,7 @@ async fn failed_registration_leaves_no_row_and_can_be_retried() {
             .is_empty()
     );
 
+    // The spec's 201 works as well as Mastodon's 200.
     m.inner.registration_status.store(201, Ordering::SeqCst);
     register(
         &ours.http,
