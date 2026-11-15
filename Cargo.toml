@@ -20,6 +20,9 @@ rusqlite = { version = "0.43.0", features = ["bundled"] }
 
 tinyindex = { path = "crates/tinyindex" }
 tokenize = { path = "crates/tokenize" }
+social_index = { path = "crates/social_index" }
+store = { path = "crates/store" }
+apub = { path = "crates/apub" }
 unicode-segmentation = "1.13.3"
 unicode-normalization = "0.1.26"
 

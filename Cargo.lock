@@ -904,6 +904,15 @@ dependencies = [
 [[package]]
 name = "mwmbl_social"
 version = "0.1.0"
+dependencies = [
+ "apub",
+ "serde_json",
+ "social_index",
+ "store",
+ "tempfile",
+ "tinyindex",
+ "tokenize",
+]
 
 [[package]]
 name = "num-traits"

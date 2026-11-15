@@ -11,3 +11,12 @@ name = "mwmbl-social"
 path = "src/main.rs"
 
 [dependencies]
+apub.workspace = true
+serde_json.workspace = true
+social_index.workspace = true
+store.workspace = true
+tinyindex.workspace = true
+tokenize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
