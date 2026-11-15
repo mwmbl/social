@@ -23,6 +23,15 @@ tokenize = { path = "crates/tokenize" }
 unicode-segmentation = "1.13.3"
 unicode-normalization = "0.1.26"
 
+# Request signing in `apub`. RustCrypto crates move in lockstep (digest 0.11 / rand_core 0.10),
+# so these are pinned together to avoid duplicate trait versions.
+ed25519-dalek = "3.0.0"
+rsa = { version = "0.10.0", features = ["pkcs1v15"] }
+sha2 = "0.11.1"
+base64 = "0.23.1"
+getrandom = { version = "0.4.3", features = ["sys_rng"] }
+httpdate = "1.0.3"
+
 # Page packing compresses and serialises a page a dozen times per write; unoptimised
 # serde_json makes index tests crawl. Optimise dependencies even in dev builds.
 [profile.dev.package."*"]

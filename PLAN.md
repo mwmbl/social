@@ -138,6 +138,11 @@ crates/
   apub/         ActivityPub client: HTTP signatures (RFC 9421 + cavage-12), signed GET,
                 server actor + WebFinger, object parsing (Note/Page/Article/Person/Group…),
                 consent evaluation
+                (`apub::signatures`: framework-agnostic, operating on a method, a target URI,
+                a header lookup and a status. Fixed component set; RFC 9421 signs ed25519 and
+                rsa-v1_5-sha256 and also verifies rsa-pss-sha512; cavage-12 is RSA-SHA256 only,
+                `hs2019` accepted on verify. Cavage verification requires a covered `date` or
+                `(created)` and checks its skew.)
   fasp/         FASP general (registration, provider_info, activation, request signing/
                 verification, content-digest) + data_sharing + account_search handlers
   mwmbl_social/ binary: axum server, background workers, CLI, config
