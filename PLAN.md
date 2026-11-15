@@ -446,6 +446,11 @@ removes it.
 3. Registration, initiated by us:
    - Self-hosted: `mwmbl-social register <server-url>`. It discovers `faspBaseUrl` via nodeinfo,
      POSTs `/registration`, stores the result, and prints the fingerprint and completion URL.
+   - **Mastodon 4.7.5 does not put `faspBaseUrl` in its nodeinfo metadata**, though the spec
+     says it MUST (checked against the e2e environment, 2026-11-15). Its FASP API lives at
+     `/api/fasp`. So: use `metadata.faspBaseUrl` if present; otherwise, if nodeinfo's
+     `software.name` is `mastodon`, use `<server-url>/api/fasp`; otherwise fail with a clear
+     message. `register --fasp-base-url <url>` overrides discovery.
    - Hosted: a minimal server-rendered sign-up page doing the same. This can come at the end of
      the stage, after the CLI works.
 4. Capability activation endpoints. Turning `data_sharing` on should:

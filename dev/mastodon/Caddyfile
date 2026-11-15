@@ -1,0 +1,14 @@
+{
+	local_certs
+	skip_install_trust
+}
+
+mastodon.test {
+	tls internal
+	reverse_proxy web:3000
+}
+
+social.test {
+	tls internal
+	reverse_proxy social:8080
+}
