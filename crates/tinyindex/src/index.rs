@@ -112,14 +112,14 @@ impl<T: IndexItem> TinyIndex<T> {
         path: &Path,
         num_pages: usize,
         page_size: usize,
-        tokenizer_version: Option<u32>,
+        tokenizer: Option<String>,
     ) -> Result<IndexWriter<T>, IndexError> {
         let metadata = IndexMetadata {
             version: INDEX_VERSION,
             page_size,
             num_pages,
             item_factory: T::ITEM_FACTORY.to_string(),
-            tokenizer_version,
+            tokenizer,
         };
         let header = metadata.to_bytes().map_err(|e| IndexError::Metadata {
             path: path.to_path_buf(),

@@ -58,7 +58,8 @@ fn mmh3_matches_python() {
 fn created_index_has_the_right_shape_and_reopens() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.tinyindex");
-    let writer = TinyIndex::<Document>::create(&path, 7, PAGE_SIZE, Some(3)).unwrap();
+    let writer =
+        TinyIndex::<Document>::create(&path, 7, PAGE_SIZE, Some("tok-v3".to_string())).unwrap();
     drop(writer);
     assert_eq!(
         fs::metadata(&path).unwrap().len(),
@@ -68,7 +69,7 @@ fn created_index_has_the_right_shape_and_reopens() {
     let m = index.metadata();
     assert_eq!((m.version, m.page_size, m.num_pages), (1, PAGE_SIZE, 7));
     assert_eq!(m.item_factory, "Document");
-    assert_eq!(m.tokenizer_version, Some(3));
+    assert_eq!(m.tokenizer, Some("tok-v3".to_string()));
     for page in 0..7 {
         assert!(index.read_page(page).unwrap().is_empty());
     }
@@ -79,7 +80,7 @@ fn created_index_has_the_right_shape_and_reopens() {
 }
 
 #[test]
-fn metadata_without_tokenizer_version_is_what_python_writes() {
+fn metadata_without_tokenizer_is_what_python_writes() {
     // Mwmbl's Python builds TinyIndexMetadata(**json), so an extra key would break it.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.tinyindex");
@@ -107,7 +108,7 @@ fn opens_an_index_whose_metadata_python_wrote() {
     }
     fs::write(&path, bytes).unwrap();
     let index = TinyIndex::<Document>::open(&path).unwrap();
-    assert_eq!(index.metadata().tokenizer_version, None);
+    assert_eq!(index.metadata().tokenizer, None);
     assert_eq!(index.read_page(2).unwrap().len(), 5);
 }
 

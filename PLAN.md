@@ -250,7 +250,8 @@ no fediverse knowledge.
   of `url` from those terms' pages, whatever term the copy carries.
 - A page that won't decode is an error for the writer, never an empty page to merge onto.
   Readers retry it a few times, since the writer may be mid-write.
-- The tokeniser version is an optional `tokenizer_version` key in the metadata JSON. It is
+- The key scheme (tokeniser version plus `KeyConfig`, since both decide the keys) is an
+  optional opaque `tokenizer` string in the metadata JSON. Opening refuses a mismatch. It is
   omitted when unset, so `Document` indexes keep the exact header Mwmbl's Python reads.
 
 Tuple layouts, with required fields first and optional ones last so they can be truncated:

@@ -20,7 +20,7 @@ pub enum MetadataError {
 /// What an index file says about itself.
 ///
 /// For a `Document` index the header is byte-compatible with Python's `TinyIndexMetadata`,
-/// which is built with `TinyIndexMetadata(**json)`: `tokenizer_version` is only written when
+/// which is built with `TinyIndexMetadata(**json)`: `tokenizer` is only written when
 /// set, so Python never sees a key it does not know.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexMetadata {
@@ -28,9 +28,11 @@ pub struct IndexMetadata {
     pub page_size: usize,
     pub num_pages: usize,
     pub item_factory: String,
-    /// The version of the tokeniser whose output the keys are. Set by callers that tokenise.
+    /// Identifies the function that turned items into keys (tokeniser version and key
+    /// settings), so a caller that re-derives keys to delete can refuse an index built with
+    /// another. Opaque to this crate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokenizer_version: Option<u32>,
+    pub tokenizer: Option<String>,
 }
 
 impl IndexMetadata {
@@ -60,19 +62,19 @@ impl IndexMetadata {
 mod tests {
     use super::*;
 
-    fn metadata(tokenizer_version: Option<u32>) -> IndexMetadata {
+    fn metadata(tokenizer: Option<String>) -> IndexMetadata {
         IndexMetadata {
             version: INDEX_VERSION,
             page_size: 4096,
             num_pages: 5,
             item_factory: "Document".into(),
-            tokenizer_version,
+            tokenizer,
         }
     }
 
     #[test]
     fn round_trips() {
-        for version in [None, Some(2)] {
+        for version in [None, Some("tok1;10".to_string())] {
             let m = metadata(version);
             assert_eq!(
                 IndexMetadata::from_bytes(&m.to_bytes().unwrap()).unwrap(),
