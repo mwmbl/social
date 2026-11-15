@@ -23,11 +23,14 @@
 pub mod index;
 pub mod item;
 pub mod keys;
+pub mod search;
 pub mod sweep;
 pub mod tombstones;
 
+pub use index::SocialReader;
 pub use index::{DeleteOutcome, SocialIndex, SocialIndexError};
 pub use item::{SocialAccount, SocialPost};
 pub use keys::{KeyScheme, Keyed};
+pub use search::{search_accounts, search_posts};
 pub use sweep::{SweepOutcome, SweepSeen, sweep_page};
 pub use tombstones::Tombstones;
