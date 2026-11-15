@@ -203,8 +203,11 @@ operational state only. It must not mirror the index or grow with it: no per-doc
 per-account rows, and no term lists. Every table below is bounded by the number of registrations
 and hosts, or by a fixed time window.
 
-- **`registrations`**: id, server base URL, `serverId` (ours), `faspId` (theirs), our Ed25519
-  keypair, their public key, status (pending/active/revoked), created_at.
+- **`registrations`**: id, the server's **FASP base URL** (`base_url`; this is what the client
+  calls, and it is not always the server's own URL, e.g. Mastodon's is `<server>/api/fasp`),
+  `serverId` (ours), `faspId` (theirs), our Ed25519 keypair, their public key, status
+  (pending/active/revoked), created_at. A registration becomes `active` on the first request
+  from that server that verifies; the spec gives us no approval callback.
 - **`capabilities`**: registration_id, capability id, version, enabled, updated_at.
 - **`subscriptions`**: registration_id, remote subscription id, category, type, created_at.
 - **`backfills`**: registration_id, remote id, category, state, more_available.
@@ -479,10 +482,29 @@ removes it.
    - start backfill for both categories (`maxCount` configurable), following continuations
      while `moreObjectsAvailable`.
 
-   Turning it off unsubscribes and stops calls. Should a deactivated server's data be purged?
+   Turning it off deletes the registration's local subscription and backfill rows and makes no
+   server calls: the capability is already disabled on the server's side, and calling a disabled
+   capability's API is forbidden (principle 4), so we do not send `DELETE` for subscriptions.
+   Turning it on again starts from scratch. Should a deactivated server's data be purged?
    Decide that; see open questions.
+   - Mastodon activates `data_sharing` using only the major version we advertise
+     (`POST /capabilities/data_sharing/0/activation`); we accept `0` and `0.1` and record
+     the advertised `0.1`. Unknown capability or version gets a (signed) 404.
+   - Mastodon returns subscription and backfill ids as JSON numbers, not strings as the spec
+     shows; the client accepts both and stores strings. Announcements carry string ids.
+   - Implemented in `crates/fasp`: `registration` (discovery and `/registration`), `http` (the
+     axum router, request authentication and response signing, driven by the `FaspState`
+     trait), `client` (`FaspClient`, which refuses a capability's API unless the store says it
+     is enabled, checked on every call) and `data_sharing` (`on_enable`, `on_disable`,
+     `on_backfill_announcement`, `resume_backfills`). Backfill continuation happens only when
+     the binary says the fetch queue has room; otherwise `more_available` stays set in
+     `backfills` and `resume_backfills` picks it up.
 5. `POST /data_sharing/v0/announcements`: verify the signature and the registration, enqueue
    the URIs with priority (new/update > backfill > revalidate), and return 204 quickly.
+   Announcements are dropped (still 204) when `data_sharing` is not enabled for the
+   registration or the source id is not one of its subscriptions or backfills; `trending`
+   events are dropped; at most 1000 `http(s)` URIs are taken per request; a malformed body
+   gets 422.
 6. Tune the sweep's revalidation against real servers: spread the fetches and respect per-host
    budgets, so a weekly pass doesn't overload a big host.
 7. Accounts: when an account turns off `discoverable` or `indexable`, add an author tombstone

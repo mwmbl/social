@@ -7,3 +7,18 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+apub.workspace = true
+store.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "sync"] }

@@ -522,6 +522,21 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 [[package]]
 name = "fasp"
 version = "0.1.0"
+dependencies = [
+ "apub",
+ "axum",
+ "base64",
+ "getrandom 0.4.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "store",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "fastrand"

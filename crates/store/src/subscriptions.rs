@@ -157,6 +157,46 @@ impl Store {
         expect_changed(changed, op, || format!("backfill {id}"))
     }
 
+    /// Every backfill of a registration, in any state, oldest first.
+    pub fn list_backfills(&self, registration_id: i64) -> Result<Vec<Backfill>, StoreError> {
+        let op = format!("list backfills of registration {registration_id}");
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, registration_id, remote_id, category, state, more_available
+                 FROM backfills WHERE registration_id = ?1 ORDER BY id",
+            )
+            .map_err(ctx(op.clone()))?;
+        stmt.query_map([registration_id], backfill_row)
+            .map_err(ctx(op.clone()))?
+            .collect::<Result<_, _>>()
+            .map_err(ctx(op))
+    }
+
+    /// Deletes every subscription row of a registration, returning how many. Local only.
+    pub fn delete_subscriptions(&self, registration_id: i64) -> Result<usize, StoreError> {
+        self.conn
+            .execute(
+                "DELETE FROM subscriptions WHERE registration_id = ?1",
+                [registration_id],
+            )
+            .map_err(ctx(format!(
+                "delete subscriptions of registration {registration_id}"
+            )))
+    }
+
+    /// Deletes every backfill row of a registration, returning how many. Local only.
+    pub fn delete_backfills(&self, registration_id: i64) -> Result<usize, StoreError> {
+        self.conn
+            .execute(
+                "DELETE FROM backfills WHERE registration_id = ?1",
+                [registration_id],
+            )
+            .map_err(ctx(format!(
+                "delete backfills of registration {registration_id}"
+            )))
+    }
+
     pub fn list_active_backfills(&self) -> Result<Vec<Backfill>, StoreError> {
         let op = "list active backfills";
         let mut stmt = self
@@ -209,6 +249,28 @@ mod tests {
         assert!(!s.delete_subscription(a, "r1")?);
         assert_eq!(s.list_subscriptions(a)?.len(), 1);
         assert_eq!(s.list_subscriptions(b)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn list_and_delete_per_registration() -> TestResult {
+        let s = Store::open_in_memory()?;
+        let (a, b) = (reg(&s, "a")?, reg(&s, "b")?);
+        s.add_subscription(a, "r1", Category::Content, SubscriptionType::Lifecycle, 5)?;
+        s.add_subscription(a, "r2", Category::Account, SubscriptionType::Lifecycle, 5)?;
+        s.add_subscription(b, "r1", Category::Content, SubscriptionType::Lifecycle, 5)?;
+        let done = s.add_backfill(a, "bf1", Category::Content)?;
+        s.update_backfill(done.id, BackfillState::Done, false)?;
+        s.add_backfill(a, "bf2", Category::Account)?;
+        s.add_backfill(b, "bf1", Category::Content)?;
+        // list_backfills includes finished ones, unlike list_active_backfills.
+        assert_eq!(s.list_backfills(a)?.len(), 2);
+        assert_eq!(s.list_active_backfills()?.len(), 2);
+        assert_eq!(s.delete_subscriptions(a)?, 2);
+        assert_eq!(s.delete_backfills(a)?, 2);
+        assert_eq!(s.delete_subscriptions(a)?, 0);
+        assert_eq!(s.list_subscriptions(b)?.len(), 1);
+        assert_eq!(s.list_backfills(b)?.len(), 1);
         Ok(())
     }
 

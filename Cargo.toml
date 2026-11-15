@@ -23,6 +23,7 @@ tokenize = { path = "crates/tokenize" }
 social_index = { path = "crates/social_index" }
 store = { path = "crates/store" }
 apub = { path = "crates/apub" }
+fasp = { path = "crates/fasp" }
 unicode-segmentation = "1.13.3"
 unicode-normalization = "0.1.26"
 

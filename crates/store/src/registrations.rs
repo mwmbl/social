@@ -189,6 +189,29 @@ impl Store {
         expect_changed(changed, op, || format!("registration {id}"))
     }
 
+    /// Moves a registration from `pending` to `active`. Returns whether it was pending: a
+    /// revoked or already active registration is left alone.
+    pub fn activate_registration(&self, id: i64) -> Result<bool, StoreError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE registrations SET status = 'active' WHERE id = ?1 AND status = 'pending'",
+                [id],
+            )
+            .map_err(ctx(format!("activate registration {id}")))?;
+        Ok(changed > 0)
+    }
+
+    /// Deletes a registration and, by cascade, its capabilities, subscriptions and backfills.
+    /// Returns whether it existed.
+    pub fn delete_registration(&self, id: i64) -> Result<bool, StoreError> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM registrations WHERE id = ?1", [id])
+            .map_err(ctx(format!("delete registration {id}")))?;
+        Ok(changed > 0)
+    }
+
     /// Records whether a capability version is enabled for a registration.
     pub fn set_capability(
         &self,
@@ -315,6 +338,34 @@ mod tests {
             s.set_registration_remote(999, "x", &[]),
             Err(StoreError::NotFound { .. })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn activate_only_moves_pending() -> TestResult {
+        let s = Store::open_in_memory()?;
+        let r = s.create_registration(new("https://a.example", "sid-a"))?;
+        assert!(s.activate_registration(r.id)?);
+        assert!(!s.activate_registration(r.id)?);
+        s.set_registration_status(r.id, RegistrationStatus::Revoked)?;
+        assert!(!s.activate_registration(r.id)?);
+        assert_eq!(
+            s.registration(r.id)?.map(|r| r.status),
+            Some(RegistrationStatus::Revoked)
+        );
+        assert!(!s.activate_registration(999)?);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_registration_cascades() -> TestResult {
+        let s = Store::open_in_memory()?;
+        let r = s.create_registration(new("https://a.example", "sid-a"))?;
+        s.set_capability(r.id, "data_sharing", "0.1", true, 1)?;
+        assert!(s.delete_registration(r.id)?);
+        assert!(!s.delete_registration(r.id)?);
+        assert_eq!(s.registration(r.id)?, None);
+        assert!(!s.capability_enabled(r.id, "data_sharing", "0.1")?);
         Ok(())
     }
 
