@@ -59,7 +59,7 @@ struct Inner {
 }
 
 /// How long to wait before fetching an object an `update` announcement names. Mastodon 4.7.5
-/// caches a status's ActivityPub JSON for 3 minutes under a key that ignores `updated_at`, and
+/// caches a status's `ActivityPub` JSON for 3 minutes under a key that ignores `updated_at`, and
 /// announces the update at once, so fetching straight away gets the old version.
 pub const UPDATE_FETCH_DELAY_SECS: i64 = 4 * 60;
 
