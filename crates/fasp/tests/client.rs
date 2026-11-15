@@ -52,7 +52,7 @@ async fn every_call_rechecks_the_capability() {
         .with_store(|s| s.set_capability(id, "data_sharing", "0.1", false, 2))
         .unwrap();
     assert!(matches!(
-        ds.subscribe(Category::Content, SubscriptionType::Lifecycle, None)
+        ds.subscribe(Category::Content, SubscriptionType::Lifecycle, Some(20))
             .await,
         Err(ClientError::NotEnabled(_))
     ));
@@ -151,7 +151,7 @@ async fn response_verification_failures_are_errors() {
         .tamper_signature
         .store(true, Ordering::SeqCst);
     let err = ds
-        .subscribe(Category::Content, SubscriptionType::Lifecycle, None)
+        .subscribe(Category::Content, SubscriptionType::Lifecycle, Some(20))
         .await
         .unwrap_err();
     assert!(

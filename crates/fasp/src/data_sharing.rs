@@ -12,6 +12,11 @@ use crate::error::ClientError;
 
 const CATEGORIES: [Category; 2] = [Category::Content, Category::Account];
 
+/// The `maxBatchSize` we ask for. The spec makes it optional, but Mastodon 4.7.5 stores it
+/// in a NOT NULL column and answers 500 without it. Its lifecycle announcements carry one
+/// URI each anyway.
+pub const MAX_BATCH_SIZE: u32 = 20;
+
 /// What [`on_enable`] created in this run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EnableOutcome {
@@ -60,7 +65,7 @@ pub async fn on_enable<S: StoreAccess>(
             .any(|s| s.category == category && s.subscription_type == SubscriptionType::Lifecycle);
         if !has_subscription {
             let remote_id = data_sharing
-                .subscribe(category, SubscriptionType::Lifecycle, None)
+                .subscribe(category, SubscriptionType::Lifecycle, Some(MAX_BATCH_SIZE))
                 .await?;
             store.with_store(|s| {
                 s.add_subscription(

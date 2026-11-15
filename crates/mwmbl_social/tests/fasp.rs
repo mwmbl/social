@@ -182,7 +182,7 @@ async fn registers_activates_ingests_deletes_and_stops() {
         assert!(
             subscription_bodies
                 .iter()
-                .any(|b| b == &json!({"category": category, "subscriptionType": "lifecycle"})),
+                .any(|b| b == &json!({"category": category, "subscriptionType": "lifecycle", "maxBatchSize": 20})),
             "{category}: {subscription_bodies:?}"
         );
     }

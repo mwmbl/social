@@ -61,8 +61,8 @@ async fn on_enable_creates_two_subscriptions_and_two_backfills_once() {
             .unwrap()
             .clone(),
         vec![
-            json!({"category": "content", "subscriptionType": "lifecycle"}),
-            json!({"category": "account", "subscriptionType": "lifecycle"}),
+            json!({"category": "content", "subscriptionType": "lifecycle", "maxBatchSize": 20}),
+            json!({"category": "account", "subscriptionType": "lifecycle", "maxBatchSize": 20}),
         ]
     );
     assert_eq!(

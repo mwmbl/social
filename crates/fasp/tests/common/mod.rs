@@ -249,6 +249,10 @@ async fn fake_dispatch(State(inner): State<Arc<FakeInner>>, request: Request) ->
     let json_body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
     match (method.as_str(), path.trim_start_matches("/api/fasp")) {
         ("POST", "/data_sharing/v0/event_subscriptions") => {
+            // Mastodon 4.7.5 answers 500 without maxBatchSize (a NOT NULL column).
+            if json_body.get("maxBatchSize").is_none() {
+                return fake_signed(&inner, 500, Vec::new());
+            }
             inner.subscription_bodies.lock().unwrap().push(json_body);
             // Mastodon returns the id as a JSON number.
             let reply = json!({"subscription": {"id": id()}});

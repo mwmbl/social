@@ -418,6 +418,10 @@ fn fasp_api(
     let json_body = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
     match (method, api_path) {
         ("POST", "/data_sharing/v0/event_subscriptions") => {
+            // Mastodon 4.7.5 answers 500 without maxBatchSize (a NOT NULL column).
+            if json_body.get("maxBatchSize").is_none() {
+                return signed(inner, 500, Vec::new());
+            }
             let category = json_body["category"]
                 .as_str()
                 .unwrap_or_default()
