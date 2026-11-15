@@ -1,0 +1,4 @@
+# Pinned so local runs and CI use the same clippy: a new stable's lints otherwise break CI.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]

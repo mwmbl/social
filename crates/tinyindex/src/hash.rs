@@ -12,12 +12,9 @@ fn mix_k(k: u32) -> u32 {
 #[must_use]
 pub fn mmh3_32(data: &[u8]) -> u32 {
     let mut h: u32 = 0;
-    let blocks = data.chunks_exact(4);
-    let tail = blocks.remainder();
+    let (blocks, tail) = data.as_chunks::<4>();
     for block in blocks {
-        let mut bytes = [0u8; 4];
-        bytes.copy_from_slice(block);
-        h ^= mix_k(u32::from_le_bytes(bytes));
+        h ^= mix_k(u32::from_le_bytes(*block));
         h = h.rotate_left(13).wrapping_mul(5).wrapping_add(0xe654_6b64);
     }
     let mut k: u32 = 0;

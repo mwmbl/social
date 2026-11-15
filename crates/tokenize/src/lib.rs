@@ -170,12 +170,12 @@ mod tests {
 
     #[test]
     fn empty_and_punctuation_only() {
-        assert!(tokenize("").is_empty());
-        assert!(tokenize("!?,.;:-- ()").is_empty());
-        assert!(tokenize("…").is_empty());
-        assert!(field_keys("", &KeyConfig::default()).is_empty());
-        assert!(query_keys("").is_empty());
-        assert!(query_keys("#").is_empty());
+        assert_eq!(tokenize(""), Vec::<String>::new());
+        assert_eq!(tokenize("!?,.;:-- ()"), Vec::<String>::new());
+        assert_eq!(tokenize("…"), Vec::<String>::new());
+        assert_eq!(field_keys("", &KeyConfig::default()), Vec::<String>::new());
+        assert_eq!(query_keys(""), Vec::<String>::new());
+        assert_eq!(query_keys("#"), Vec::<String>::new());
     }
 
     #[test]
@@ -199,8 +199,8 @@ mod tests {
 
     #[test]
     fn lone_symbols() {
-        assert!(tokenize("@").is_empty());
-        assert!(tokenize("#").is_empty());
+        assert_eq!(tokenize("@"), Vec::<String>::new());
+        assert_eq!(tokenize("#"), Vec::<String>::new());
     }
 
     #[test]

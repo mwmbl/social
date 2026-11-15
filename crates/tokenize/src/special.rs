@@ -92,10 +92,10 @@ mod tests {
 
     #[test]
     fn lone_symbols_are_nothing() {
-        assert!(special_keys("#").is_empty());
-        assert!(special_keys("@").is_empty());
-        assert!(special_keys("# @ #. @.").is_empty());
-        assert!(special_keys("").is_empty());
+        assert_eq!(special_keys("#"), Vec::<String>::new());
+        assert_eq!(special_keys("@"), Vec::<String>::new());
+        assert_eq!(special_keys("# @ #. @."), Vec::<String>::new());
+        assert_eq!(special_keys(""), Vec::<String>::new());
     }
 
     #[test]
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn mention_after_word_char_is_not_one() {
-        assert!(special_keys("a@b.c").is_empty());
+        assert_eq!(special_keys("a@b.c"), Vec::<String>::new());
     }
 
     #[test]
