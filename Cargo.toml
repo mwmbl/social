@@ -16,6 +16,8 @@ serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 thiserror = "2.0.21"
 zstd = "0.13"
 tempfile = "3.27.0"
+unicode-segmentation = "1.13.3"
+unicode-normalization = "0.1.26"
 
 tinyindex = { path = "crates/tinyindex" }
 tokenize = { path = "crates/tokenize" }

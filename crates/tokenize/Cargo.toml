@@ -7,3 +7,5 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+unicode-segmentation.workspace = true
+unicode-normalization.workspace = true
