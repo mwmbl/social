@@ -28,6 +28,7 @@ x-mastodon: &mastodon
   volumes:
     - ca:/ca:ro
     - ./seed.rb:/seed/seed.rb:ro
+    - ./fasp.rb:/seed/fasp.rb:ro
   depends_on: [db, redis, ca]
   networks: [e2e]
 
