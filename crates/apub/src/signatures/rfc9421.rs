@@ -405,6 +405,16 @@ pub fn verify<H: Headers + ?Sized>(
     policy: &VerifyPolicy<'_>,
     key_lookup: impl Fn(&str) -> Option<VerifyingKey>,
 ) -> Result<VerifiedSignature, SignatureError> {
+    verify_inner(message, headers, policy, true, key_lookup)
+}
+
+fn verify_inner<H: Headers + ?Sized>(
+    message: &Message<'_>,
+    headers: &H,
+    policy: &VerifyPolicy<'_>,
+    require_keyid: bool,
+    key_lookup: impl Fn(&str) -> Option<VerifyingKey>,
+) -> Result<VerifiedSignature, SignatureError> {
     let input_value = required_header(headers, "signature-input")?;
     let signature_value = required_header(headers, "signature")?;
     let input = parse_input(&input_value, policy.label)?;
@@ -426,11 +436,11 @@ pub fn verify<H: Headers + ?Sized>(
             seconds: policy.now.saturating_sub(expires),
         });
     }
-    let keyid = input
-        .params
-        .keyid
-        .clone()
-        .ok_or(SignatureError::MissingKeyId)?;
+    let keyid = match (input.params.keyid.clone(), require_keyid) {
+        (Some(keyid), _) => keyid,
+        (None, false) => String::new(),
+        (None, true) => return Err(SignatureError::MissingKeyId),
+    };
     let key = key_lookup(&keyid).ok_or_else(|| SignatureError::UnknownKey {
         keyid: keyid.clone(),
     })?;
@@ -485,4 +495,22 @@ pub fn verify_response<H: Headers + ?Sized>(
     key_lookup: impl Fn(&str) -> Option<VerifyingKey>,
 ) -> Result<VerifiedSignature, SignatureError> {
     verify(&Message::Response { status }, headers, policy, key_lookup)
+}
+
+/// Verifies a response signature against the one key it must be from, whatever `keyid` it
+/// names or if it names none. For FASP: Mastodon 4.7.5 signs its responses with no `keyid`,
+/// and we know the server's key from registration anyway.
+pub fn verify_response_with_key<H: Headers + ?Sized>(
+    status: u16,
+    headers: &H,
+    policy: &VerifyPolicy<'_>,
+    key: &VerifyingKey,
+) -> Result<VerifiedSignature, SignatureError> {
+    verify_inner(
+        &Message::Response { status },
+        headers,
+        policy,
+        false,
+        |_| Some(key.clone()),
+    )
 }

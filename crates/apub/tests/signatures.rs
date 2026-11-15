@@ -1575,3 +1575,43 @@ fn generated_rsa_key_signs_and_round_trips_pem() {
         key.verifying_key()
     );
 }
+
+/// Mastodon 4.7.5 signs FASP responses with `created` and no `keyid`. A caller that knows the
+/// signer's key can verify them; key lookup by `keyid` still requires one.
+#[test]
+fn responses_without_keyid_verify_against_a_known_key() {
+    let signer = Ed25519SigningKey::from_seed(&[9; 32]);
+    let key = SigningKey::Ed25519(Ed25519SigningKey::from_seed(&[9; 32]));
+    let digest = content_digest(b"{}");
+    let params = SignatureParams {
+        created: Some(1000),
+        ..SignatureParams::default()
+    };
+    let (input, signature) = rfc9421::sign(
+        &Message::Response { status: 201 },
+        &[("content-digest", digest.as_str())],
+        "sig1",
+        &["@status", "content-digest"],
+        &params,
+        &key,
+    )
+    .unwrap();
+    assert!(!input.contains("keyid"), "{input}");
+    let headers = [
+        ("content-digest", digest.as_str()),
+        ("signature-input", input.as_str()),
+        ("signature", signature.as_str()),
+    ];
+    let policy = VerifyPolicy::new(&["@status", "content-digest"], 1000, 300);
+    let public = VerifyingKey::Ed25519(signer.verifying_key());
+    let verified = rfc9421::verify_response_with_key(201, &headers[..], &policy, &public).unwrap();
+    assert_eq!(verified.keyid, "");
+    assert!(matches!(
+        rfc9421::verify_response(201, &headers[..], &policy, |_| Some(public.clone())),
+        Err(SignatureError::MissingKeyId)
+    ));
+    // The wrong key, or a tampered status, still fails.
+    let other = VerifyingKey::Ed25519(Ed25519SigningKey::from_seed(&[8; 32]).verifying_key());
+    assert!(rfc9421::verify_response_with_key(201, &headers[..], &policy, &other).is_err());
+    assert!(rfc9421::verify_response_with_key(200, &headers[..], &policy, &public).is_err());
+}

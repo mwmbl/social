@@ -266,13 +266,13 @@ impl<S: StoreAccess> FaspClient<S> {
         let digest = apub::signatures::integrity::verify_content_digest_header(&lookup, &body);
         digest.map_err(failed)?;
         // The server's key is the only key we hold for this registration, so the signature's
-        // `keyid` is not used to choose a key.
+        // `keyid` is not used to choose a key, and may be absent: Mastodon 4.7.5 sends none.
         let policy = VerifyPolicy::new(
             &["@status", "content-digest"],
             (self.clock)(),
             MAX_SKEW_SECS,
         );
-        rfc9421::verify_response(status, &lookup, &policy, |_| Some(self.their_key.clone()))
+        rfc9421::verify_response_with_key(status, &lookup, &policy, &self.their_key)
             .map_err(failed)?;
         Ok(Verified { status, body })
     }

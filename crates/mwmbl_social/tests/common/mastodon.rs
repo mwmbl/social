@@ -302,7 +302,7 @@ fn json_response(status: u16, value: &Value) -> Response {
     response
 }
 
-/// Signs a response the way Mastodon does: `@status` and `content-digest`, keyid = faspId.
+/// Signs a response the way Mastodon does: `@status` and `content-digest`, no `keyid`.
 fn signed(inner: &Inner, status: u16, body: Vec<u8>) -> Response {
     let mut response = Response::new(Body::from(body.clone()));
     *response.status_mut() = StatusCode::from_u16(status).unwrap();
@@ -312,12 +312,17 @@ fn signed(inner: &Inner, status: u16, body: Vec<u8>) -> Response {
             .insert("content-type", HeaderValue::from_static("application/json"));
     }
     let digest = content_digest(&body);
-    let (input, signature) = rfc9421::sign_response(
-        status,
+    // Mastodon 4.7.5 (Linzer) signs responses with `created` and no `keyid`.
+    let params = rfc9421::SignatureParams {
+        created: Some(now()),
+        ..rfc9421::SignatureParams::default()
+    };
+    let (input, signature) = rfc9421::sign(
+        &rfc9421::Message::Response { status },
         &[("content-digest", digest.as_str())],
+        rfc9421::DEFAULT_LABEL,
         &["@status", "content-digest"],
-        &inner.fasp_id,
-        now(),
+        &params,
         &SigningKey::Ed25519(Ed25519SigningKey::from_seed(&inner.key.to_seed())),
     )
     .unwrap();
