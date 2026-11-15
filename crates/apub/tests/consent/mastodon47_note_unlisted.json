@@ -1,0 +1,96 @@
+{
+    "@context": [
+        "https://www.w3.org/ns/activitystreams",
+        {
+            "ostatus": "http://ostatus.org#",
+            "atomUri": "ostatus:atomUri",
+            "inReplyToAtomUri": "ostatus:inReplyToAtomUri",
+            "conversation": "ostatus:conversation",
+            "sensitive": "as:sensitive",
+            "toot": "http://joinmastodon.org/ns#",
+            "votersCount": "toot:votersCount",
+            "quote": {
+                "@id": "https://w3id.org/fep/044f#quote",
+                "@type": "@id"
+            },
+            "quoteUri": "http://fedibird.com/ns#quoteUri",
+            "_misskey_quote": "https://misskey-hub.net/ns#_misskey_quote",
+            "quoteAuthorization": {
+                "@id": "https://w3id.org/fep/044f#quoteAuthorization",
+                "@type": "@id"
+            },
+            "gts": "https://gotosocial.org/ns#",
+            "interactionPolicy": {
+                "@id": "gts:interactionPolicy",
+                "@type": "@id"
+            },
+            "canFeature": {
+                "@id": "https://w3id.org/fep/7aa9#canFeature",
+                "@type": "@id"
+            },
+            "canQuote": {
+                "@id": "gts:canQuote",
+                "@type": "@id"
+            },
+            "automaticApproval": {
+                "@id": "gts:automaticApproval",
+                "@type": "@id"
+            },
+            "manualApproval": {
+                "@id": "gts:manualApproval",
+                "@type": "@id"
+            }
+        }
+    ],
+    "id": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818289490324",
+    "type": "Note",
+    "summary": null,
+    "inReplyTo": null,
+    "published": "2026-11-15T22:29:33Z",
+    "url": "https://mastodon.test/@alice/117622818289490324",
+    "attributedTo": "https://mastodon.test/ap/users/117622812625693465",
+    "to": [
+        "https://mastodon.test/ap/users/117622812625693465/followers"
+    ],
+    "cc": [
+        "https://www.w3.org/ns/activitystreams#Public"
+    ],
+    "sensitive": false,
+    "atomUri": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818289490324",
+    "inReplyToAtomUri": null,
+    "conversation": "https://mastodon.test/contexts/117622812625693465-117622818289490324",
+    "context": "https://mastodon.test/contexts/117622812625693465-117622818289490324",
+    "content": "<p>An unlisted thought about compost 197202</p>",
+    "contentMap": {
+        "en": "<p>An unlisted thought about compost 197202</p>"
+    },
+    "interactionPolicy": {
+        "canQuote": {
+            "automaticApproval": [
+                "https://mastodon.test/ap/users/117622812625693465"
+            ]
+        }
+    },
+    "attachment": [],
+    "tag": [],
+    "replies": {
+        "id": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818289490324/replies",
+        "type": "Collection",
+        "first": {
+            "type": "CollectionPage",
+            "next": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818289490324/replies?only_other_accounts=true&page=true",
+            "partOf": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818289490324/replies",
+            "items": []
+        }
+    },
+    "likes": {
+        "id": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818289490324/likes",
+        "type": "Collection",
+        "totalItems": 0
+    },
+    "shares": {
+        "id": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818289490324/shares",
+        "type": "Collection",
+        "totalItems": 0
+    }
+}

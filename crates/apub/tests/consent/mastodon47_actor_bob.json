@@ -1,0 +1,101 @@
+{
+    "@context": [
+        "https://www.w3.org/ns/activitystreams",
+        "https://w3id.org/security/v1",
+        "https://purl.archive.org/socialweb/webfinger",
+        {
+            "manuallyApprovesFollowers": "as:manuallyApprovesFollowers",
+            "toot": "http://joinmastodon.org/ns#",
+            "featured": {
+                "@id": "toot:featured",
+                "@type": "@id"
+            },
+            "featuredTags": {
+                "@id": "toot:featuredTags",
+                "@type": "@id"
+            },
+            "alsoKnownAs": {
+                "@id": "as:alsoKnownAs",
+                "@type": "@id"
+            },
+            "movedTo": {
+                "@id": "as:movedTo",
+                "@type": "@id"
+            },
+            "schema": "http://schema.org#",
+            "PropertyValue": "schema:PropertyValue",
+            "value": "schema:value",
+            "discoverable": "toot:discoverable",
+            "suspended": "toot:suspended",
+            "memorial": "toot:memorial",
+            "indexable": "toot:indexable",
+            "attributionDomains": {
+                "@id": "toot:attributionDomains",
+                "@container": "@set"
+            },
+            "showFeatured": "toot:showFeatured",
+            "showMedia": "toot:showMedia",
+            "showRepliesInMedia": "toot:showRepliesInMedia",
+            "gts": "https://gotosocial.org/ns#",
+            "interactionPolicy": {
+                "@id": "gts:interactionPolicy",
+                "@type": "@id"
+            },
+            "canFeature": {
+                "@id": "https://w3id.org/fep/7aa9#canFeature",
+                "@type": "@id"
+            },
+            "canQuote": {
+                "@id": "gts:canQuote",
+                "@type": "@id"
+            },
+            "automaticApproval": {
+                "@id": "gts:automaticApproval",
+                "@type": "@id"
+            },
+            "manualApproval": {
+                "@id": "gts:manualApproval",
+                "@type": "@id"
+            }
+        }
+    ],
+    "id": "https://mastodon.test/ap/users/117622818264362341",
+    "webfinger": "bob@mastodon.test",
+    "type": "Person",
+    "following": "https://mastodon.test/ap/users/117622818264362341/following",
+    "followers": "https://mastodon.test/ap/users/117622818264362341/followers",
+    "inbox": "https://mastodon.test/ap/users/117622818264362341/inbox",
+    "outbox": "https://mastodon.test/ap/users/117622818264362341/outbox",
+    "featured": "https://mastodon.test/ap/users/117622818264362341/collections/featured",
+    "featuredTags": "https://mastodon.test/ap/users/117622818264362341/collections/tags",
+    "preferredUsername": "bob",
+    "name": "Bob",
+    "summary": "<p>Bob tests Mwmbl Social</p>",
+    "url": "https://mastodon.test/@bob",
+    "manuallyApprovesFollowers": false,
+    "discoverable": true,
+    "indexable": false,
+    "published": "2026-11-15T00:00:00Z",
+    "memorial": false,
+    "showFeatured": true,
+    "showMedia": true,
+    "showRepliesInMedia": true,
+    "interactionPolicy": {
+        "canFeature": {
+            "automaticApproval": [
+                "https://www.w3.org/ns/activitystreams#Public"
+            ]
+        }
+    },
+    "featuredCollections": "https://mastodon.test/ap/users/117622818264362341/featured_collections",
+    "publicKey": {
+        "id": "https://mastodon.test/ap/users/117622818264362341#rsa-454c7a2962de67de",
+        "owner": "https://mastodon.test/ap/users/117622818264362341",
+        "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsAojD0xL1QjvCXfkRIPD\ngE3l7Kiy9kFWRRaHlDKAuusJKWq+Usl6xgcdHFF5hP2WT4c+KVtHYICpPeA6Alsm\np008ZSVSGSdqv45jILYhj1qVzEfhYHHYxzbozmDvuuRyBpmIH9BrH3UP//vQJn1R\nHgifk8s9duquhk9aJUfm1DeE0a7MvIwXcHnRrM5ouNtbLbbXOwQrM43knxwxmhfx\nLSXi/QZ0+WR8z5HULSVvUiGvFz09JRakvWY5VD0gSKAtxzZzJA5ojORCgiBXhawL\n6/HV7Wxj02CHn8OESurV9WE85rC2HbK3HzxuVHyma0STmn/KNqHOFIQJ3DZLb4yE\nvwIDAQAB\n-----END PUBLIC KEY-----\n"
+    },
+    "tag": [],
+    "attachment": [],
+    "endpoints": {
+        "sharedInbox": "https://mastodon.test/inbox"
+    }
+}

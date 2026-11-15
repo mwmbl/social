@@ -362,3 +362,30 @@ fn accounts() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Objects captured from the end-to-end Mastodon 4.7.5 in dev/mastodon (`seed.rb`), so the
+/// rules are checked against what a current Mastodon really serves, not only our models of it.
+#[test]
+fn captured_from_mastodon_4_7() {
+    let alice = load("mastodon47_actor_alice");
+    let bob = load("mastodon47_actor_bob");
+    assert_eq!(evaluate_account(&alice), Ok(()));
+    assert_eq!(evaluate_account(&bob), Ok(()), "bob is discoverable");
+    assert_eq!(
+        evaluate_post(&load("mastodon47_note_public"), &alice),
+        Ok(())
+    );
+    assert_eq!(
+        evaluate_post(&load("mastodon47_note_unlisted"), &alice),
+        Err(Refusal::NotPublic)
+    );
+    assert_eq!(
+        evaluate_post(&load("mastodon47_note_bob"), &bob),
+        Err(Refusal::NotIndexable)
+    );
+    // And a post paired with the wrong author is refused.
+    assert_eq!(
+        evaluate_post(&load("mastodon47_note_public"), &bob),
+        Err(Refusal::AuthorMismatch)
+    );
+}

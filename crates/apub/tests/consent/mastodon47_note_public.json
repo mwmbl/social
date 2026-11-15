@@ -1,0 +1,103 @@
+{
+    "@context": [
+        "https://www.w3.org/ns/activitystreams",
+        {
+            "ostatus": "http://ostatus.org#",
+            "atomUri": "ostatus:atomUri",
+            "inReplyToAtomUri": "ostatus:inReplyToAtomUri",
+            "conversation": "ostatus:conversation",
+            "sensitive": "as:sensitive",
+            "toot": "http://joinmastodon.org/ns#",
+            "votersCount": "toot:votersCount",
+            "quote": {
+                "@id": "https://w3id.org/fep/044f#quote",
+                "@type": "@id"
+            },
+            "quoteUri": "http://fedibird.com/ns#quoteUri",
+            "_misskey_quote": "https://misskey-hub.net/ns#_misskey_quote",
+            "quoteAuthorization": {
+                "@id": "https://w3id.org/fep/044f#quoteAuthorization",
+                "@type": "@id"
+            },
+            "gts": "https://gotosocial.org/ns#",
+            "interactionPolicy": {
+                "@id": "gts:interactionPolicy",
+                "@type": "@id"
+            },
+            "canFeature": {
+                "@id": "https://w3id.org/fep/7aa9#canFeature",
+                "@type": "@id"
+            },
+            "canQuote": {
+                "@id": "gts:canQuote",
+                "@type": "@id"
+            },
+            "automaticApproval": {
+                "@id": "gts:automaticApproval",
+                "@type": "@id"
+            },
+            "manualApproval": {
+                "@id": "gts:manualApproval",
+                "@type": "@id"
+            },
+            "Hashtag": "as:Hashtag"
+        }
+    ],
+    "id": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818280864877",
+    "type": "Note",
+    "summary": null,
+    "inReplyTo": null,
+    "published": "2026-11-15T22:29:33Z",
+    "url": "https://mastodon.test/@alice/117622818280864877",
+    "attributedTo": "https://mastodon.test/ap/users/117622812625693465",
+    "to": [
+        "https://www.w3.org/ns/activitystreams#Public"
+    ],
+    "cc": [
+        "https://mastodon.test/ap/users/117622812625693465/followers"
+    ],
+    "sensitive": false,
+    "atomUri": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818280864877",
+    "inReplyToAtomUri": null,
+    "conversation": "https://mastodon.test/contexts/117622812625693465-117622818280864877",
+    "context": "https://mastodon.test/contexts/117622812625693465-117622818280864877",
+    "content": "<p>Planting garlic in the allotment today <a href=\"https://mastodon.test/tags/gardening\" class=\"mention hashtag\" rel=\"tag\">#<span>gardening</span></a> bdf75a</p>",
+    "contentMap": {
+        "en": "<p>Planting garlic in the allotment today <a href=\"https://mastodon.test/tags/gardening\" class=\"mention hashtag\" rel=\"tag\">#<span>gardening</span></a> bdf75a</p>"
+    },
+    "interactionPolicy": {
+        "canQuote": {
+            "automaticApproval": [
+                "https://mastodon.test/ap/users/117622812625693465"
+            ]
+        }
+    },
+    "attachment": [],
+    "tag": [
+        {
+            "type": "Hashtag",
+            "href": "https://mastodon.test/tags/gardening",
+            "name": "#gardening"
+        }
+    ],
+    "replies": {
+        "id": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818280864877/replies",
+        "type": "Collection",
+        "first": {
+            "type": "CollectionPage",
+            "next": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818280864877/replies?only_other_accounts=true&page=true",
+            "partOf": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818280864877/replies",
+            "items": []
+        }
+    },
+    "likes": {
+        "id": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818280864877/likes",
+        "type": "Collection",
+        "totalItems": 0
+    },
+    "shares": {
+        "id": "https://mastodon.test/ap/users/117622812625693465/statuses/117622818280864877/shares",
+        "type": "Collection",
+        "totalItems": 0
+    }
+}

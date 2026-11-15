@@ -25,6 +25,7 @@ x-mastodon: &mastodon
     SINGLE_USER_MODE: "false"
   volumes:
     - ca:/ca:ro
+    - ./seed.rb:/seed/seed.rb:ro
   depends_on: [db, redis, ca]
   networks: [e2e]
 
