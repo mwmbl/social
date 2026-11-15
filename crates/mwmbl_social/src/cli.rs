@@ -1,9 +1,11 @@
-//! The command line: `serve`, `ingest`, `search`, `forget` and `stats`.
+//! The command line: `serve`, `ingest`, `search`, `forget`, `stats` and the registration
+//! commands `register`, `registrations` and `unregister`.
 //!
 //! One process at a time may write the indexes, enforced by the lock on `writer.lock`
 //! ([`WriterLock`]). `ingest` and `forget` write in-process when the lock is free and otherwise
 //! only record their request in SQLite for the running server to pick up. `search` and `stats`
-//! never need the lock.
+//! never need the lock. The registration commands only write SQLite (and `register` makes
+//! outbound HTTP), so they need no lock either.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,9 +15,12 @@ use anyhow::{Context, bail};
 use apub::actor::server_actor_key_id;
 use apub::fetch::{Fetcher, FetcherConfig, user_agent};
 use clap::{Parser, Subcommand, ValueEnum};
+use fasp::registration::{RegistrationOutcome, register as fasp_register};
 use serde_json::{Value, json};
 use social_index::{SocialAccount, SocialPost, SocialReader, Tombstones};
-use store::{EnqueueOutcome, FetchKind, FetchReason, NewFetch, Store, TombstoneKind};
+use store::{
+    EnqueueOutcome, FetchKind, FetchReason, NewFetch, RegistrationStatus, Store, TombstoneKind,
+};
 use tinyindex::TinyIndex;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -24,13 +29,16 @@ use url::Url;
 
 use crate::config::{Config, ENV_CONFIG_PATH};
 use crate::decide::Action;
+use crate::fasp_app::{FaspApp, MAINTAIN_EVERY};
 use crate::http::{AppState, router};
 use crate::keys::load_or_generate;
+use crate::metrics::{self, MetricsState};
 use crate::now_secs;
 use crate::search;
 use crate::sweep::{SweepConfig, run_index, step_interval};
 use crate::worker::{
-    Worker, WorkerConfig, adhoc_item, persist_hosts, run_host_persistence, seed_hosts,
+    FetchCounters, Worker, WorkerConfig, adhoc_item, persist_hosts, run_host_persistence,
+    seed_hosts,
 };
 use crate::writer::{
     ForgetTarget, IndexName, Writer, WriterHandle, WriterLock, load_tombstones, run_reload,
@@ -74,8 +82,23 @@ pub enum Command {
         /// A URI (contains `://`), an account (`user@host`) or a domain.
         target: String,
     },
-    /// Print queue, tombstone, sweep and index statistics as JSON.
+    /// Print queue, tombstone, registration, sweep and index statistics as JSON.
     Stats,
+    /// Register with a fediverse server so it can use us as a FASP.
+    Register {
+        /// The server's own URL, e.g. `https://mastodon.example`.
+        server_url: String,
+        /// The server's FASP base URL, if discovery through nodeinfo does not find it.
+        #[arg(long, value_name = "URL")]
+        fasp_base_url: Option<String>,
+    },
+    /// List registrations (never their keys) as JSON.
+    Registrations,
+    /// Revoke a registration and forget its subscriptions and backfills.
+    Unregister {
+        /// The registration id shown by `registrations`.
+        id: i64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -138,6 +161,22 @@ pub async fn run(command: Command, config: Config) -> anyhow::Result<()> {
         Command::Search { what } => search_command(&config, what),
         Command::Forget { target } => forget(&config, &target).await,
         Command::Stats => print_json(&stats(&config)?),
+        Command::Register {
+            server_url,
+            fasp_base_url,
+        } => {
+            let outcome = register(&config, &server_url, fasp_base_url.as_deref()).await?;
+            println!(
+                "{}",
+                registration_report(&outcome, config.require_base_url()?)
+            );
+            Ok(())
+        }
+        Command::Registrations => print_json(&registrations(&config)?),
+        Command::Unregister { id } => {
+            let summary = unregister(&config, id)?;
+            print_json(&summary)
+        }
     }
 }
 
@@ -206,12 +245,13 @@ fn spawn_background(
     handle: &WriterHandle,
     fetcher: &Arc<Fetcher>,
     shutdown: &watch::Receiver<bool>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Arc<FetchCounters>> {
     let worker = Arc::new(Worker::new(
         Arc::clone(fetcher),
         handle.clone(),
         worker_config(config),
     ));
+    let counters = worker.counters();
     tasks.spawn(worker.run(open_store(config)?, shutdown.clone()));
 
     let (posts, accounts) = handle.readers();
@@ -241,46 +281,96 @@ fn spawn_background(
         shutdown.clone(),
     ));
     tasks.spawn(run_reload(handle.clone(), RELOAD_EVERY, shutdown.clone()));
-    Ok(())
+    Ok(counters)
 }
 
 async fn serve(config: Config) -> anyhow::Result<()> {
-    let base_url = config.require_base_url()?.to_string();
-    let lock = WriterLock::try_acquire(&config)?.with_context(|| {
+    config.require_base_url()?;
+    let lock = acquire_lock(&config)?;
+    let listener = tokio::net::TcpListener::bind(&config.listen)
+        .await
+        .with_context(|| format!("failed to listen on {}", config.listen))?;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    });
+    serve_with_lock(config, lock, listener, shutdown_rx).await
+}
+
+fn acquire_lock(config: &Config) -> anyhow::Result<WriterLock> {
+    WriterLock::try_acquire(config)?.with_context(|| {
         format!(
             "another mwmbl-social process already holds the writer lock {}; \
              only one server may write the indexes",
             config.lock_path().display()
         )
-    })?;
+    })
+}
+
+/// Runs the whole server on `listener` until `shutdown` is signalled: what `serve` does, minus
+/// the signal handling. Tests use it to run the real thing in-process.
+pub async fn serve_on(
+    config: Config,
+    listener: tokio::net::TcpListener,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    config.require_base_url()?;
+    let lock = acquire_lock(&config)?;
+    serve_with_lock(config, lock, listener, shutdown).await
+}
+
+async fn serve_with_lock(
+    config: Config,
+    lock: WriterLock,
+    listener: tokio::net::TcpListener,
+    shutdown_rx: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let base_url = config.require_base_url()?.to_string();
     let key = load_or_generate(&config.keys_dir())?;
     let public_key_pem = key
         .verifying_key()
         .to_spki_pem()
         .context("failed to encode the actor's public key")?;
-    let listener = tokio::net::TcpListener::bind(&config.listen)
-        .await
-        .with_context(|| format!("failed to listen on {}", config.listen))?;
     let writer = Writer::start_with_lock(&config, lock)?;
     let handle = writer.handle();
     let fetcher = Arc::new(build_fetcher(&config, &base_url, key)?);
     let seeded = seed_hosts(&fetcher, &open_store(&config)?, now_secs())?;
     tracing::info!(hosts = seeded, "restored host state");
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut tasks: JoinSet<()> = JoinSet::new();
-    spawn_background(&mut tasks, &config, &handle, &fetcher, &shutdown_rx)?;
+    let counters = spawn_background(&mut tasks, &config, &handle, &fetcher, &shutdown_rx)?;
     let (posts, accounts) = handle.readers();
 
-    let app = router(AppState {
+    let fasp = FaspApp::new(
+        open_store(&config)?,
+        http_client(&base_url)?,
+        &config,
+        &base_url,
+    );
+    tasks.spawn(
+        fasp.clone()
+            .run_maintenance(MAINTAIN_EVERY, shutdown_rx.clone()),
+    );
+    let mut app = router(AppState {
         base_url: base_url.clone(),
         actor_username: config.actor_username.clone(),
         name: config.name.clone(),
         public_key_pem,
-        posts,
-        accounts,
+        posts: posts.clone(),
+        accounts: accounts.clone(),
         tombstones: handle.tombstones(),
-    });
+    })
+    .merge(fasp.routes());
+    if config.metrics {
+        app = app.merge(metrics::router(Arc::new(MetricsState {
+            store: std::sync::Mutex::new(open_store(&config)?),
+            counters,
+            posts,
+            accounts,
+        })));
+        tracing::warn!("serving /metrics on the main listener: firewall or proxy that path");
+    }
     tracing::info!(listen = %config.listen, base_url, "serving");
     let server = {
         let shutdown = shutdown_rx.clone();
@@ -291,9 +381,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         })
     };
 
-    shutdown_signal().await;
+    signalled(shutdown_rx).await;
     tracing::info!("shutting down");
-    let _ = shutdown_tx.send(true);
     match server.await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::error!(error = %e, "the HTTP server failed"),
@@ -310,6 +399,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     drop(handle);
     writer.finish();
     Ok(())
+}
+
+/// The HTTP client for our own calls to servers' FASP APIs and registration.
+fn http_client(base_url: &str) -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(user_agent(base_url))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build the HTTP client")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -600,6 +698,107 @@ async fn forget(config: &Config, target: &str) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// register, registrations, unregister
+
+/// Registers with the server at `server_url` and returns what the admin needs to see. Writes
+/// only SQLite and makes outbound HTTP, so it works with or without a running server.
+pub async fn register(
+    config: &Config,
+    server_url: &str,
+    fasp_base_url: Option<&str>,
+) -> anyhow::Result<RegistrationOutcome> {
+    let our_base_url = config.require_base_url()?;
+    let our_base =
+        Url::parse(our_base_url).with_context(|| format!("bad base_url {our_base_url}"))?;
+    let server = Url::parse(server_url).with_context(|| format!("{server_url:?} is not a URL"))?;
+    let fasp_base = fasp_base_url
+        .map(|url| Url::parse(url).with_context(|| format!("{url:?} is not a URL")))
+        .transpose()?;
+    let store = std::sync::Mutex::new(open_store(config)?);
+    let http = http_client(our_base_url)?;
+    fasp_register(
+        &http,
+        &store,
+        &config.name,
+        &our_base,
+        &server,
+        fasp_base.as_ref(),
+        now_secs(),
+    )
+    .await
+    .with_context(|| format!("failed to register with {server_url}"))
+}
+
+/// What `register` prints: the fingerprint to compare, the link to approve at, and what to do
+/// next.
+#[must_use]
+pub fn registration_report(outcome: &RegistrationOutcome, our_base_url: &str) -> String {
+    format!(
+        "Registered with {server} (registration {id}, pending approval).\n\n\
+         Key fingerprint: {fingerprint}\n\
+         Approval link:   {link}\n\n\
+         Next: open the approval link, compare the fingerprint shown there with the one above, \
+         and approve. Then enable the data_sharing capability for this provider on the server. \
+         Our server must be running and reachable from it at {base}.",
+        server = outcome.fasp_base_url,
+        id = outcome.registration_id,
+        fingerprint = outcome.fingerprint,
+        link = outcome.completion_uri,
+        base = our_base_url,
+    )
+}
+
+fn registrations(config: &Config) -> anyhow::Result<Value> {
+    let store = open_store(config)?;
+    let mut out = Vec::new();
+    for registration in store.list_registrations()? {
+        let capabilities: Vec<String> = store
+            .enabled_capabilities(registration.id)?
+            .into_iter()
+            .map(|(id, version)| format!("{id}@{version}"))
+            .collect();
+        out.push(json!({
+            "id": registration.id,
+            "base_url": registration.base_url,
+            "status": registration.status.as_str(),
+            "capabilities": capabilities,
+            "created_at": registration.created_at,
+        }));
+    }
+    Ok(Value::Array(out))
+}
+
+/// Marks a registration revoked, disables its capabilities and deletes its subscription and
+/// backfill rows. There is no remote call: the FASP spec has no unregister endpoint, and a
+/// revoked registration's requests get 401 from then on.
+pub fn unregister(config: &Config, id: i64) -> anyhow::Result<Value> {
+    let store = open_store(config)?;
+    let registration = store
+        .registration(id)?
+        .with_context(|| format!("there is no registration with id {id}"))?;
+    store.set_registration_status(id, RegistrationStatus::Revoked)?;
+    let now = now_secs();
+    for (capability, version) in store.enabled_capabilities(id)? {
+        store.set_capability(id, &capability, &version, false, now)?;
+    }
+    let subscriptions = store.delete_subscriptions(id)?;
+    let backfills = store.delete_backfills(id)?;
+    tracing::info!(
+        registration = id,
+        host = registration.base_url,
+        "registration revoked"
+    );
+    Ok(json!({
+        "id": id,
+        "base_url": registration.base_url,
+        "status": "revoked",
+        "subscriptions_deleted": subscriptions,
+        "backfills_deleted": backfills,
+        "note": "the server was not contacted; remove the provider on its side too",
+    }))
+}
+
+// ---------------------------------------------------------------------------------------------
 // stats
 
 fn index_size<T: tinyindex::IndexItem>(path: &std::path::Path) -> anyhow::Result<Value> {
@@ -629,6 +828,9 @@ fn stats(config: &Config) -> anyhow::Result<Value> {
     let now = now_secs();
     let tombstones = store.list_tombstones()?;
     let count = |kind| tombstones.iter().filter(|t| t.kind == kind).count();
+    let (registrations_by_status, registration_capabilities) =
+        metrics::registration_counts(&store)?;
+    let registrations_total: usize = registrations_by_status.values().sum();
     let value = json!({
         "queue": {
             "total": store.queue_len()?,
@@ -639,7 +841,11 @@ fn stats(config: &Config) -> anyhow::Result<Value> {
             "author": count(TombstoneKind::Author),
         },
         "domain_blocks": store.list_domain_blocks()?.len(),
-        "registrations": store.list_registrations()?.len(),
+        "registrations": {
+            "total": registrations_total,
+            "by_status": registrations_by_status,
+            "capabilities": registration_capabilities,
+        },
         "sweep": {
             "posts": sweep_json(&store, IndexName::Posts, now)?,
             "accounts": sweep_json(&store, IndexName::Accounts, now)?,
@@ -738,6 +944,110 @@ mod tests {
             json!({"action": "remove_post", "uri": "https://h.example/s/1",
                    "had_stored_record": false, "tombstone": true})
         );
+    }
+
+    #[test]
+    fn registration_commands_parse() {
+        let cli = Cli::try_parse_from([
+            "mwmbl-social",
+            "register",
+            "https://m.example",
+            "--fasp-base-url",
+            "https://m.example/api/fasp",
+        ])
+        .ok();
+        assert!(matches!(
+            cli.map(|c| c.command),
+            Some(Command::Register { server_url, fasp_base_url: Some(base) })
+                if server_url == "https://m.example" && base == "https://m.example/api/fasp"
+        ));
+        let cli = Cli::try_parse_from(["mwmbl-social", "register", "https://m.example"]).ok();
+        assert!(matches!(
+            cli.map(|c| c.command),
+            Some(Command::Register {
+                fasp_base_url: None,
+                ..
+            })
+        ));
+        let cli = Cli::try_parse_from(["mwmbl-social", "unregister", "3"]).ok();
+        assert!(matches!(
+            cli.map(|c| c.command),
+            Some(Command::Unregister { id: 3 })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["mwmbl-social", "registrations"])
+                .ok()
+                .map(|c| c.command),
+            Some(Command::Registrations)
+        ));
+        assert!(Cli::try_parse_from(["mwmbl-social", "unregister", "x"]).is_err());
+    }
+
+    #[test]
+    fn the_registration_report_tells_the_admin_what_to_do() -> anyhow::Result<()> {
+        let report = registration_report(
+            &RegistrationOutcome {
+                registration_id: 4,
+                fingerprint: "FINGERPRINT=".into(),
+                completion_uri: "https://m.example/admin/fasps/4".into(),
+                fasp_base_url: Url::parse("https://m.example/api/fasp")?,
+            },
+            "https://social.example",
+        );
+        for needle in [
+            "FINGERPRINT=",
+            "https://m.example/admin/fasps/4",
+            "registration 4",
+            "compare the fingerprint",
+            "approve",
+            "enable the data_sharing capability",
+            "https://social.example",
+        ] {
+            assert!(report.contains(needle), "{needle:?} missing from\n{report}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unregister_revokes_and_clears_without_touching_the_server() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        let store = open_store(&config)?;
+        let registration = store.create_registration(store::NewRegistration {
+            base_url: "https://m.example/api/fasp".into(),
+            server_id: "sid".into(),
+            our_private_key: vec![7; 32],
+            created_at: 1,
+        })?;
+        let id = registration.id;
+        store.set_capability(id, "data_sharing", "0.1", true, 1)?;
+        store.add_subscription(
+            id,
+            "11",
+            store::Category::Content,
+            store::SubscriptionType::Lifecycle,
+            1,
+        )?;
+        store.add_backfill(id, "12", store::Category::Content)?;
+
+        let summary = unregister(&config, id)?;
+        assert_eq!(summary["subscriptions_deleted"], 1);
+        assert_eq!(summary["backfills_deleted"], 1);
+        let after = store.registration(id)?.map(|r| r.status);
+        assert_eq!(after, Some(RegistrationStatus::Revoked));
+        assert_eq!(store.list_subscriptions(id)?.len(), 0);
+        assert_eq!(store.list_backfills(id)?.len(), 0);
+        assert_eq!(store.enabled_capabilities(id)?.len(), 0);
+
+        let listed = registrations(&config)?;
+        assert_eq!(listed[0]["status"], "revoked");
+        assert!(!listed.to_string().contains("private"));
+        let err = unregister(&config, id + 100).err().map(|e| e.to_string());
+        assert!(err.is_some_and(|e| e.contains("no registration")));
+        Ok(())
     }
 
     #[test]

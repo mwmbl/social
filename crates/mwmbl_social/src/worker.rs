@@ -6,6 +6,7 @@
 //! The worker never writes an index itself, and never logs post content: only URIs and hosts.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -112,6 +113,10 @@ impl AuthorCache {
         self.entries.get(uri).map(|e| e.value.clone())
     }
 
+    pub fn remove(&mut self, uri: &str) {
+        self.entries.remove(uri);
+    }
+
     pub fn insert(&mut self, uri: &str, value: Value, now: i64) {
         if !self.entries.contains_key(uri) && self.entries.len() >= self.capacity {
             let ttl = self.ttl_secs;
@@ -183,6 +188,47 @@ pub fn backoff_secs(attempts: i64) -> i64 {
 // ---------------------------------------------------------------------------------------------
 // The worker
 
+/// How many fetches ended in each outcome since the process started. For `/metrics`.
+#[derive(Debug, Default)]
+pub struct FetchCounters {
+    found: AtomicU64,
+    gone: AtomicU64,
+    refused: AtomicU64,
+    rate_limited: AtomicU64,
+    backoff: AtomicU64,
+    error: AtomicU64,
+}
+
+impl FetchCounters {
+    pub fn record(&self, outcome: &FetchOutcome) {
+        let counter = match outcome {
+            FetchOutcome::Found { .. } => &self.found,
+            FetchOutcome::Gone => &self.gone,
+            FetchOutcome::Refused { .. } => &self.refused,
+            FetchOutcome::RateLimited { .. } => &self.rate_limited,
+            FetchOutcome::Backoff { .. } => &self.backoff,
+            FetchOutcome::Error(_) => &self.error,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `(outcome name, count)` for every outcome, in a fixed order.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<(&'static str, u64)> {
+        [
+            ("found", &self.found),
+            ("gone", &self.gone),
+            ("refused", &self.refused),
+            ("rate_limited", &self.rate_limited),
+            ("backoff", &self.backoff),
+            ("error", &self.error),
+        ]
+        .into_iter()
+        .map(|(name, counter)| (name, counter.load(Ordering::Relaxed)))
+        .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct WorkerConfig {
     pub fetch_concurrency: usize,
@@ -221,6 +267,7 @@ pub struct Worker {
     fetcher: Arc<Fetcher>,
     writer: WriterHandle,
     authors: Mutex<AuthorCache>,
+    counters: Arc<FetchCounters>,
     config: WorkerConfig,
 }
 
@@ -281,15 +328,34 @@ impl Worker {
                 AUTHOR_CACHE_CAPACITY,
                 AUTHOR_CACHE_TTL_SECS,
             )),
+            counters: Arc::new(FetchCounters::default()),
             config,
         }
     }
 
+    /// The fetch outcome counters, shared with `/metrics`.
+    #[must_use]
+    pub fn counters(&self) -> Arc<FetchCounters> {
+        Arc::clone(&self.counters)
+    }
+
     async fn fetch(&self, uri: &str, hint: &mut Option<i64>) -> Fetched {
         let now = now_secs();
-        let (fetched, retry_hint) = to_fetched(self.fetcher.fetch(uri).await, now);
+        let outcome = self.fetcher.fetch(uri).await;
+        self.counters.record(&outcome);
+        let (fetched, retry_hint) = to_fetched(outcome, now);
         *hint = (*hint).max(retry_hint);
         fetched
+    }
+
+    /// Replaces the cached copy of an actor document with a fresh fetch, or drops it when the
+    /// fetch did not return the document.
+    fn refresh_author(&self, uri: &str, fetched: &Fetched, now: i64) {
+        let mut cache = self.authors.lock().unwrap_or_else(PoisonError::into_inner);
+        match fetched {
+            Fetched::Found(json) => cache.insert(uri, json.clone(), now),
+            _ => cache.remove(uri),
+        }
     }
 
     /// The author's actor document, from the cache or a fetch.
@@ -401,14 +467,19 @@ impl Worker {
                 self.decide_post_path(item, carried_post, &fetched, now, hint)
                     .await
             }
-            Some(false) => decide_account(
-                uri,
-                item.reason,
-                item.attempts,
-                carried_account,
-                &fetched,
-                now,
-            ),
+            Some(false) => {
+                // A freshly fetched actor document is newer than any cached copy: an opt-out
+                // announced for this account must reach posts processed after it.
+                self.refresh_author(uri, &fetched, now);
+                decide_account(
+                    uri,
+                    item.reason,
+                    item.attempts,
+                    carried_account,
+                    &fetched,
+                    now,
+                )
+            }
             None => {
                 // We don't know whether it was a post or an actor, and it is not there to say:
                 // remove it as both.

@@ -18,8 +18,10 @@
 pub mod cli;
 pub mod config;
 pub mod decide;
+pub mod fasp_app;
 pub mod http;
 pub mod keys;
+pub mod metrics;
 pub mod records;
 pub mod search;
 pub mod sweep;

@@ -1078,6 +1078,7 @@ dependencies = [
  "apub",
  "axum",
  "clap",
+ "fasp",
  "reqwest",
  "serde",
  "serde_json",

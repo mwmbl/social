@@ -48,6 +48,10 @@ pub struct Config {
     pub name: String,
     pub contact_email: Option<String>,
     pub privacy_policy_url: Option<String>,
+    /// The language tag (BCP 47) of the privacy policy at `privacy_policy_url`.
+    pub privacy_policy_language: String,
+    /// The fediverse account (`@user@host`) of the operator, advertised in `provider_info`.
+    pub fediverse_account: Option<String>,
     pub posts_pages: usize,
     pub accounts_pages: usize,
     pub page_size: usize,
@@ -62,6 +66,11 @@ pub struct Config {
     pub revalidate_after_secs: u64,
     /// A fetch that fails transiently this many times is given up on.
     pub max_transient_attempts: i64,
+    /// How many objects each FASP backfill request asks a server for, per category.
+    pub backfill_max_count: u32,
+    /// Serve Prometheus metrics at `/metrics` on the main listener. They are public there, so
+    /// firewall the path or proxy it to an internal-only listener.
+    pub metrics: bool,
     /// Allow `http://` URIs. For tests only.
     pub allow_http: bool,
 }
@@ -76,6 +85,8 @@ impl Default for Config {
             name: "Mwmbl Social".to_string(),
             contact_email: None,
             privacy_policy_url: None,
+            privacy_policy_language: "en".to_string(),
+            fediverse_account: None,
             posts_pages: 65_536,
             accounts_pages: 16_384,
             page_size: 4096,
@@ -87,6 +98,8 @@ impl Default for Config {
             sweep_period_secs: 6 * 86_400,
             revalidate_after_secs: 6 * 86_400,
             max_transient_attempts: 10,
+            backfill_max_count: 100,
+            metrics: false,
             allow_http: false,
         }
     }
@@ -171,12 +184,18 @@ impl Config {
                 }
             )+};
         }
-        set_optional!(base_url, contact_email, privacy_policy_url);
+        set_optional!(
+            base_url,
+            contact_email,
+            privacy_policy_url,
+            fediverse_account
+        );
         set!(
             listen,
             data_dir,
             actor_username,
             name,
+            privacy_policy_language,
             posts_pages,
             accounts_pages,
             page_size,
@@ -188,6 +207,8 @@ impl Config {
             sweep_period_secs,
             revalidate_after_secs,
             max_transient_attempts,
+            backfill_max_count,
+            metrics,
             allow_http,
         );
         Ok(())
@@ -218,6 +239,12 @@ impl Config {
         }
         if self.max_transient_attempts < 1 {
             return Err(invalid("max_transient_attempts", "must be at least 1"));
+        }
+        if self.backfill_max_count == 0 {
+            return Err(invalid("backfill_max_count", "must be greater than 0"));
+        }
+        if self.privacy_policy_language.trim().is_empty() {
+            return Err(invalid("privacy_policy_language", "must not be empty"));
         }
         if let Some(base_url) = &self.base_url {
             let url = url::Url::parse(base_url).map_err(|e| ConfigError::Invalid {
@@ -309,6 +336,10 @@ mod tests {
         assert_eq!(config.revalidate_after_secs, 518_400);
         assert_eq!(config.max_transient_attempts, 10);
         assert!(!config.allow_http);
+        assert_eq!(config.privacy_policy_language, "en");
+        assert_eq!(config.fediverse_account, None);
+        assert_eq!(config.backfill_max_count, 100);
+        assert!(!config.metrics);
         assert_eq!(config.base_url, None);
         config.validate()?;
         assert!(config.require_base_url().is_err());
@@ -326,6 +357,11 @@ mod tests {
             contact_email = "admin@social.example"
             allow_http = true
             key_bigrams = 3
+            privacy_policy_url = "https://social.example/privacy"
+            privacy_policy_language = "de"
+            fediverse_account = "@admin@social.example"
+            backfill_max_count = 25
+            metrics = true
         "#;
         let config = Config::from_sources(Some(("c.toml", text)), env_of(&[]))?;
         assert_eq!(config.base_url.as_deref(), Some("https://social.example"));
@@ -339,6 +375,13 @@ mod tests {
         );
         assert!(config.allow_http);
         assert_eq!(config.key_scheme().config.bigrams, 3);
+        assert_eq!(config.privacy_policy_language, "de");
+        assert_eq!(
+            config.fediverse_account.as_deref(),
+            Some("@admin@social.example")
+        );
+        assert_eq!(config.backfill_max_count, 25);
+        assert!(config.metrics);
         config.validate()?;
         assert_eq!(
             config.store_path(),
@@ -369,8 +412,16 @@ mod tests {
                 ("MWMBL_SOCIAL_CONTACT_EMAIL", "a@b.example"),
                 ("MWMBL_SOCIAL_NAME", "Mine"),
                 ("MWMBL_SOCIAL_KEY_SPECIAL", "2"),
+                ("MWMBL_SOCIAL_PRIVACY_POLICY_LANGUAGE", "fr"),
+                ("MWMBL_SOCIAL_FEDIVERSE_ACCOUNT", "@me@x.example"),
+                ("MWMBL_SOCIAL_BACKFILL_MAX_COUNT", "7"),
+                ("MWMBL_SOCIAL_METRICS", "true"),
             ]),
         )?;
+        assert_eq!(config.privacy_policy_language, "fr");
+        assert_eq!(config.fediverse_account.as_deref(), Some("@me@x.example"));
+        assert_eq!(config.backfill_max_count, 7);
+        assert!(config.metrics);
         assert_eq!(config.posts_pages, 256);
         assert_eq!(config.listen, "1.2.3.4:1");
         assert_eq!(config.base_url.as_deref(), Some("https://x.example"));
@@ -414,6 +465,10 @@ mod tests {
         assert!(bad(&|c| c.queue_cap = 0).is_some());
         assert!(bad(&|c| c.sweep_period_secs = 0).is_some());
         assert!(bad(&|c| c.max_transient_attempts = 0).is_some());
+        assert!(
+            bad(&|c| c.backfill_max_count = 0).is_some_and(|e| e.contains("backfill_max_count"))
+        );
+        assert!(bad(&|c| c.privacy_policy_language = " ".into()).is_some());
         assert!(
             bad(&|c| c.base_url = Some("not a url".into())).is_some_and(|e| e.contains("base_url"))
         );

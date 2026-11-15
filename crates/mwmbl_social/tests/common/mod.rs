@@ -2,6 +2,8 @@
 //! (writer, worker, store). Nothing here touches the network beyond 127.0.0.1.
 #![allow(dead_code)]
 
+pub mod mastodon;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -159,6 +161,20 @@ impl FakeHost {
 
     pub fn url(&self, path: &str) -> String {
         format!("{}{path}", self.origin)
+    }
+
+    /// Replace (or add) the document served at `path`.
+    pub fn set_doc(&self, path: &str, doc: Value) {
+        self.state
+            .docs
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), doc);
+    }
+
+    /// The document currently served at `path`.
+    pub fn doc(&self, path: &str) -> Option<Value> {
+        self.state.docs.lock().unwrap().get(path).cloned()
     }
 
     /// Answer 404 for `path` from now on.

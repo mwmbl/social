@@ -512,6 +512,40 @@ removes it.
 8. Observability: tracing, a `/metrics` endpoint (Prometheus) for queue depth, fetch errors,
    index docs and per-host status, plus `stats`.
 
+**Wiring in `mwmbl_social` (done):**
+- The FASP router is mounted on the main listener at the root of our base URL, but only for
+  `/provider_info`, `/capabilities/{*rest}` and `/data_sharing/{*rest}` (`fasp_app::FASP_ROUTES`).
+  The `fasp` router authenticates every path it sees, so it must not be the fallback: everything
+  else, including the 404, stays with the existing routes. A new FASP capability adds its prefix
+  to that list.
+- `fasp_app::FaspApp` is the `FaspState` (own SQLite connection behind a `Mutex<Store>`).
+  Announcements enqueue their URIs in `spawn_blocking` before the 204: kind `Object` for
+  `content` and `Actor` for `account`; reason `Announce` for lifecycle events and `Backfill` for
+  backfill sources. For backfills `on_backfill_announcement` runs on a spawned task with
+  `queue_has_room` = queue below 80% of `queue_cap`. Activation spawns `on_enable`
+  (`backfill_max_count`); deactivation runs `on_disable` (local rows only).
+- A background task, every 60 s, takes each live registration with `data_sharing` enabled:
+  if a subscription or backfill is missing (an earlier `on_enable` failed, say because the
+  server was unreachable) it retries `on_enable`; otherwise it runs `resume_backfills` while the
+  queue is below 50% of the cap. One task per registration at a time; failures are logged with
+  the host.
+- CLI: `register <server-url> [--fasp-base-url URL]` (prints fingerprint, approval link, next
+  step; SQLite and outbound HTTP only, no writer lock), `registrations` (JSON, never keys),
+  `unregister <id>` (marks revoked, disables its capabilities, deletes its subscription and
+  backfill rows; no remote call; its requests get 401). `stats` reports registrations by status
+  and enabled capabilities.
+- `/metrics` (Prometheus text, hand-written) is served on the main listener only when the
+  `metrics` config is true. It is unauthenticated, so firewall it or proxy it to an internal
+  address. It reports queue depth (total and by reason), tombstones by kind, domain blocks,
+  registrations by status, enabled capabilities, fetch outcomes (`found`, `gone`, `refused`,
+  `rate_limited`, `backoff`, `error`; counters in the worker) and index sizes. Per-host status
+  is not in it yet.
+- New config (each with an env override): `privacy_policy_language` (default `en`),
+  `fediverse_account`, `backfill_max_count` (default 100), `metrics` (default false).
+- Account opt-outs (item 7) go through `decide`'s author tombstones. A fetched actor document
+  now also replaces the worker's cached copy, so a post processed after an opt-out announcement
+  cannot be judged against a stale `indexable: true` (the cache lives for an hour).
+
 **Done when** the local Mastodon registers with us, enables data_sharing and backfills. New,
 edited and deleted public posts from opted-in accounts show up in or vanish from `search`.
 Unlisted posts and non-indexable accounts never appear.
