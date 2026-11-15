@@ -547,8 +547,25 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
 
 1. **Server actor `preferredUsername`:** `mwmbl-social` is the proposed default. Make it
    configurable.
-2. **Mastodon status:** which FASP capabilities current Mastodon releases actually call, and
-   behind what flag. Check before Stage 2.
+2. **Mastodon status:** answered from Mastodon `main` (2026-11-15):
+   - Behind `EXPERIMENTAL_FEATURES=fasp`. The server side implements registration,
+     `data_sharing` (event subscriptions create/destroy, backfill requests and continuations)
+     and the debug capability. It calls `account_search` and `follow_recommendation`.
+   - `account_search` is called as `GET /account_search/v0/search?term=...&limit=10`, with no
+     `language`, and the body is read as a JSON array of actor URIs. `Link` pagination is
+     ignored. Mastodon fetches each URI it doesn't already know.
+   - Key ids: Mastodon signs its requests to us with `keyid` = the `serverId` we sent at
+     registration. We sign ours to it with `keyid` = the `faspId` it returned. It rejects
+     requests whose `created` is more than 5 minutes old.
+   - Mastodon checks every response we send it, 204s included. The `content-digest` header must
+     be exactly `sha-256=:<base64 of SHA-256 of the body>:`, with nothing else in it. The
+     response must carry an RFC 9421 signature over `@status` and `content-digest`.
+   - Lifecycle announcements: content events only fire while the status is public and the
+     author is indexable. So a post that becomes non-public, or an author who turns off
+     `indexable`, sends us **no** event for their posts. Account `update` events do fire when
+     `discoverable` changes. Weekly revalidation is therefore the only thing that catches those
+     consent changes, so the sweep is required, not a backstop. Also check the author's
+     `indexable` when an account `update` arrives, and add an author tombstone if it is off.
 3. **Data from a deactivated or revoked server:** we don't record which server announced
    what, so purging per server isn't possible. The proposed default is to keep it. It is public
    and opted in, and the sweep keeps rechecking it. An admin can still `forget` a domain.
