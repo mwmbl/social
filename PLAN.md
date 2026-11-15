@@ -595,6 +595,12 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
    - Mastodon checks every response we send it, 204s included. The `content-digest` header must
      be exactly `sha-256=:<base64 of SHA-256 of the body>:`, with nothing else in it. The
      response must carry an RFC 9421 signature over `@status` and `content-digest`.
+   - **Signed fetches, checked end to end** (dev/mastodon, Mastodon 4.7.5 with
+     `AUTHORIZED_FETCH=true`): an unsigned GET gets 401. Our RFC 9421 GET, signed over
+     `@method` and `@target-uri` with `created` and `keyid`, gets 200. Mastodon fetches our key
+     from the `keyid` (`/actor#main-key`). Stage 0's done-when passes against it: `ingest`
+     indexes alice's public post, `search` finds it, and after it is deleted upstream the
+     sweep's revalidation gets 404 and removes it, with no tombstone needed.
    - Lifecycle announcements: content events only fire while the status is public and the
      author is indexable. So a post that becomes non-public, or an author who turns off
      `indexable`, sends us **no** event for their posts. Account `update` events do fire when

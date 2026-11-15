@@ -1,0 +1,6 @@
+# Use with: docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml up -d social
+services:
+  social:
+    build:
+      context: ./prebuilt
+      dockerfile: Dockerfile

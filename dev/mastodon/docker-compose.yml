@@ -11,6 +11,8 @@ x-mastodon: &mastodon
   environment: &mastodon-env
     LOCAL_DOMAIN: mastodon.test
     EXPERIMENTAL_FEATURES: fasp
+    # Require signed fetches, so the e2e checks really exercise our HTTP signatures.
+    AUTHORIZED_FETCH: "true"
     # Docker's private ranges, so Mastodon may call social.test (which resolves to Caddy).
     ALLOWED_PRIVATE_ADDRESSES: 172.16.0.0/12,192.168.0.0/16,10.0.0.0/8
     DB_HOST: db
@@ -54,10 +56,10 @@ services:
 
   # Builds /ca/bundle.pem (system roots + Caddy's root) once Caddy has made its CA.
   ca:
-    image: alpine:3
+    # Caddy's image already has the system roots, so nothing needs downloading.
+    image: caddy:2-alpine
     command: >
-      sh -c 'apk add --no-cache ca-certificates >/dev/null &&
-             until [ -f /caddy/caddy/pki/authorities/local/root.crt ]; do sleep 1; done &&
+      sh -c 'until [ -f /caddy/caddy/pki/authorities/local/root.crt ]; do sleep 1; done &&
              cat /etc/ssl/certs/ca-certificates.crt /caddy/caddy/pki/authorities/local/root.crt > /ca/bundle.pem.tmp &&
              cp /caddy/caddy/pki/authorities/local/root.crt /ca/caddy-root.crt &&
              mv /ca/bundle.pem.tmp /ca/bundle.pem && echo CA bundle ready'

@@ -2,6 +2,8 @@
 # Run:   docker run -v mwmbl-social:/data -e MWMBL_SOCIAL_BASE_URL=https://social.example mwmbl-social
 FROM rust:1.100-bookworm AS build
 WORKDIR /src
+# Use the image's own 1.100.0 rather than letting rust-toolchain.toml pull clippy and rustfmt.
+ENV RUSTUP_TOOLCHAIN=1.100.0
 COPY . .
 RUN cargo build --release -p mwmbl_social
 

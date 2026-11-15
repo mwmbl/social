@@ -183,9 +183,16 @@ pub enum FetchOutcome {
     Error(FetchError),
 }
 
+/// How long a host stays cached as cavage-only before RFC 9421 is tried on it again.
+const RETRY_RFC9421_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
 #[derive(Default)]
 struct HostState {
     scheme: Option<SignatureScheme>,
+    /// When the host was last found to need cavage-12. The FASP `data_sharing` spec says RFC 9421
+    /// MUST be retried periodically for such hosts, so the cache expires after
+    /// [`RETRY_RFC9421_AFTER`].
+    cavage_since: Option<Instant>,
     backoff_until: Option<i64>,
     failures: u32,
     next_slot: Option<Instant>,
@@ -215,7 +222,24 @@ impl HostEntry {
     }
 
     fn remember(&self, scheme: SignatureScheme) {
-        self.state().scheme = Some(scheme);
+        let mut state = self.state();
+        state.scheme = Some(scheme);
+        state.cavage_since = (scheme == SignatureScheme::Cavage).then(Instant::now);
+    }
+
+    /// The scheme to try first: the cached one, except that a cavage-only host is tried with
+    /// RFC 9421 again once its cache entry is old enough.
+    fn first_scheme(&self) -> SignatureScheme {
+        let state = self.state();
+        match (state.scheme, state.cavage_since) {
+            (Some(SignatureScheme::Cavage), Some(since))
+                if since.elapsed() >= RETRY_RFC9421_AFTER =>
+            {
+                SignatureScheme::Rfc9421
+            }
+            (Some(scheme), _) => scheme,
+            (None, _) => SignatureScheme::Rfc9421,
+        }
     }
 
     fn succeeded(&self) {
@@ -362,6 +386,8 @@ impl Fetcher {
         let entry = self.entry(&host.to_ascii_lowercase());
         let mut state = entry.state();
         state.scheme = snapshot.scheme;
+        // A persisted cavage entry counts from now: we don't know how old it is.
+        state.cavage_since = (snapshot.scheme == Some(SignatureScheme::Cavage)).then(Instant::now);
         state.backoff_until = snapshot.backoff_until;
         state.failures = u32::from(snapshot.backoff_until.is_some());
     }
@@ -476,7 +502,7 @@ impl Fetcher {
         host: &str,
         entry: &HostEntry,
     ) -> Result<reqwest::Response, FetchOutcome> {
-        let first = entry.state().scheme.unwrap_or(SignatureScheme::Rfc9421);
+        let first = entry.first_scheme();
         let response = self.send_once(url, first, host, entry).await?;
         if !auth_failed(response.status()) {
             Self::note_scheme(&response, first, entry);
@@ -522,9 +548,9 @@ impl Fetcher {
         ];
         match scheme {
             SignatureScheme::Rfc9421 => {
-                // NOTE: needs checking against real Mastodon in end-to-end testing: that its RFC
-                // 9421 verification accepts `@method` and `@target-uri` with `created` and
-                // `keyid` on a GET (and what it does with an `alg` we leave out).
+                // Checked end to end: Mastodon 4.7.5 with AUTHORIZED_FETCH accepts a GET
+                // signed over `@method` and `@target-uri` with `created` and `keyid` and no
+                // `alg`, fetching our key from `keyid` (dev/mastodon, 2026-11-15).
                 let (input, signature) = rfc9421::sign_request(
                     "GET",
                     uri,
