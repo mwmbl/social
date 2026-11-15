@@ -361,8 +361,9 @@ any page, including on crowded indexes where `uri:` lookups miss.
 - an `update` event that turns out to fail consent
 - revalidation returning 404 or 410, a Tombstone, or lost consent
 - the account no longer being discoverable or indexable. This adds an *author* tombstone: its
-  posts are filtered from results immediately and physically removed by the sweep. The account's
-  own record is deleted by URI.
+  posts are filtered from results immediately and physically removed by the sweep. An author
+  tombstone covers posts only. If the account is no longer discoverable, its own record is also
+  deleted by URI; if it is still discoverable but not indexable, the account stays searchable.
 - a domain block, applied by search-time filtering and the sweep
 - an admin CLI command `mwmbl-social forget <uri|acct|domain>`
 

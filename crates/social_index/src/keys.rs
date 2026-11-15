@@ -40,8 +40,10 @@ impl KeyScheme {
 /// An index item that knows its own keys.
 pub trait Keyed: IndexItem + Clone {
     fn uri(&self) -> &str;
-    /// The author's actor URI, for author tombstones. An account is its own author.
-    fn author_uri(&self) -> &str;
+    /// The author's actor URI, for author tombstones. `None` for accounts: an author
+    /// tombstone removes someone's posts (they turned off `indexable`), not their account,
+    /// which is deleted by URI when they turn off `discoverable`.
+    fn author_uri(&self) -> Option<&str>;
     fn checked(&self) -> i64;
     fn set_checked(&mut self, checked: i64);
     /// This item as the copy stored under `term`.
@@ -64,8 +66,8 @@ impl Keyed for SocialPost {
         &self.uri
     }
 
-    fn author_uri(&self) -> &str {
-        &self.author_uri
+    fn author_uri(&self) -> Option<&str> {
+        Some(&self.author_uri)
     }
 
     fn checked(&self) -> i64 {
@@ -99,8 +101,8 @@ impl Keyed for SocialAccount {
         &self.uri
     }
 
-    fn author_uri(&self) -> &str {
-        &self.uri
+    fn author_uri(&self) -> Option<&str> {
+        None
     }
 
     fn checked(&self) -> i64 {

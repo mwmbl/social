@@ -38,7 +38,7 @@ impl Tombstones {
         self.objects.insert(uri.to_string());
     }
 
-    /// Everything by an author: their posts and their account.
+    /// Every post by an author. Their account record is not affected.
     pub fn add_author(&mut self, actor_uri: &str) {
         self.authors.insert(actor_uri.to_string());
     }
@@ -96,11 +96,12 @@ impl Tombstones {
     /// Whether this item must not be shown and should be removed from the index.
     #[must_use]
     pub fn blocks<T: Keyed>(&self, item: &T) -> bool {
+        let author = item.author_uri();
         self.objects.contains(item.uri())
-            || self.authors.contains(item.author_uri())
+            || author.is_some_and(|a| self.authors.contains(a))
             || (!self.domains.is_empty()
                 && (self.uri_domain_blocked(item.uri())
-                    || self.uri_domain_blocked(item.author_uri())))
+                    || author.is_some_and(|a| self.uri_domain_blocked(a))))
     }
 }
 
@@ -138,7 +139,10 @@ mod tests {
         t.add_author("https://h.example/users/a");
         assert!(t.blocks(&p), "posts by a tombstoned author");
         let a = account("https://h.example/users/a", "a@h.example", "A");
-        assert!(t.blocks(&a), "and the author's own account");
+        assert!(!t.blocks(&a), "but not the author's own account");
+        t.add_domain("h.example");
+        assert!(t.blocks(&a), "a domain block does cover accounts");
+        t.remove_domain("h.example");
         t.remove_author("https://h.example/users/a");
 
         t.add_domain("Example.");
