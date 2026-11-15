@@ -1,0 +1,13 @@
+[package]
+name = "mwmbl_social"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mwmbl-social"
+path = "src/main.rs"
+
+[dependencies]

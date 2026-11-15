@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/mwmbl/social"
+rust-version = "1.90"
+
+# Every dependency is pinned here and used from crates with `workspace = true`.
+[workspace.dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+thiserror = "2.0.21"
+zstd = "0.13"
+tempfile = "3.27.0"
+
+tinyindex = { path = "crates/tinyindex" }
+tokenize = { path = "crates/tokenize" }
+store = { path = "crates/store" }
+apub = { path = "crates/apub" }
+fasp = { path = "crates/fasp" }
