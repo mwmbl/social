@@ -58,8 +58,14 @@ struct Inner {
     busy: Mutex<HashSet<i64>>,
 }
 
+/// How long to wait before fetching an object an `update` announcement names. Mastodon 4.7.5
+/// caches a status's ActivityPub JSON for 3 minutes under a key that ignores `updated_at`, and
+/// announces the update at once, so fetching straight away gets the old version.
+pub const UPDATE_FETCH_DELAY_SECS: i64 = 4 * 60;
+
 /// Our FASP state: cheap to clone, shared by the router and the background tasks.
 #[derive(Clone)]
+
 pub struct FaspApp {
     inner: Arc<Inner>,
 }
@@ -177,7 +183,13 @@ impl FaspApp {
 
     /// Queues every URI. Announcements are admitted even when the queue is at its cap; the
     /// store defers backfill work instead. Returns how many URIs were taken.
-    fn enqueue_all(&self, uris: &[String], kind: FetchKind, reason: FetchReason) -> usize {
+    fn enqueue_all(
+        &self,
+        uris: &[String],
+        kind: FetchKind,
+        reason: FetchReason,
+        delay_secs: i64,
+    ) -> usize {
         let now = now_secs();
         let mut taken = 0;
         for uri in uris {
@@ -186,7 +198,7 @@ impl FaspApp {
                 kind,
                 reason,
                 record: None,
-                not_before: now,
+                not_before: now + delay_secs,
             };
             match self.with_store(|s| s.enqueue(&item, now, self.inner.queue_cap)) {
                 Ok(store::EnqueueOutcome::Deferred) => {}
@@ -449,9 +461,15 @@ impl FaspState for FaspApp {
             ),
         };
         let count = object_uris.len();
+        let delay = if event == Some(EventType::Update) {
+            UPDATE_FETCH_DELAY_SECS
+        } else {
+            0
+        };
         let app = self.clone();
         let queued =
-            tokio::task::spawn_blocking(move || app.enqueue_all(&object_uris, kind, reason)).await;
+            tokio::task::spawn_blocking(move || app.enqueue_all(&object_uris, kind, reason, delay))
+                .await;
         match queued {
             Ok(taken) => tracing::debug!(
                 registration = registration_id,

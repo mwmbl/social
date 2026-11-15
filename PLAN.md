@@ -657,6 +657,16 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
      from the `keyid` (`/actor#main-key`). Stage 0's done-when passes against it: `ingest`
      indexes alice's public post, `search` finds it, and after it is deleted upstream the
      sweep's revalidation gets 404 and removes it, with no tombstone needed.
+   - **Edits are cached for 3 minutes.** Mastodon serves a status's ActivityPub JSON from a
+     3-minute cache keyed without `updated_at`, and announces an `update` at once. An
+     immediate fetch gets the pre-edit text (seen end to end). So `update` events are queued
+     with `not_before` 4 minutes out.
+   - **Other Mastodon deviations found end to end:** registration answers 200, not 201;
+     `event_subscriptions` needs `maxBatchSize` (500 without it); and its responses are signed
+     with no `keyid`, so the client verifies them against the server's key from registration.
+     A registration attempt that fails after Mastodon has created its provider leaves that
+     provider behind, and Mastodon refuses a second one for the same base URL until an admin
+     deletes it.
    - Lifecycle announcements: content events only fire while the status is public and the
      author is indexable. So a post that becomes non-public, or an author who turns off
      `indexable`, sends us **no** event for their posts. Account `update` events do fire when

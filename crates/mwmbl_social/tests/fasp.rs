@@ -314,6 +314,33 @@ async fn registers_activates_ingests_deletes_and_stops() {
         .unwrap();
     assert!(found >= 4, "{metrics}");
 
+    // An update event is fetched only after Mastodon's 3-minute cache of the old version has
+    // expired.
+    let edited = fake.url("/notes/edited");
+    let reply = fake
+        .call_ours_json(
+            "POST",
+            ANNOUNCEMENTS,
+            &lifecycle(
+                &content_sub,
+                "content",
+                "update",
+                std::slice::from_ref(&edited),
+            ),
+        )
+        .await;
+    assert_eq!(reply.status, 204);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .cast_signed();
+    let due_now = ours.store().next_due(now + 60, 10).unwrap();
+    assert!(due_now.iter().all(|q| q.uri != edited), "fetched too early");
+    let due_later = ours.store().next_due(now + 300, 10).unwrap();
+    assert!(due_later.iter().any(|q| q.uri == edited), "{due_later:?}");
+    ours.store().complete(&edited).unwrap();
+
     // A delete event, with the object gone: removed from search, and a tombstone is left.
     fake.set_gone("/notes/n1");
     let reply = fake
