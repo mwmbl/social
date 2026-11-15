@@ -132,6 +132,8 @@ crates/
   tinyindex/    copied mwmbl_core::index + ported TinyIndex: open/create, retrieve(term),
                 add(docs), delete(url, terms). No fediverse knowledge. Upstream target.
   tokenize/     Unicode-aware tokeniser + key selection (see below)
+  social_index/ SocialPost/SocialAccount item types, index keys, URI lookup, delete by
+                re-tokenising, tombstone filtering, the sweep core. The layer above tinyindex.
   store/        SQLite (rusqlite, WAL, bundled) schema + migrations + queries
   apub/         ActivityPub client: HTTP signatures (RFC 9421 + cavage-12), signed GET,
                 server actor + WebFinger, object parsing (Note/Page/Article/Person/Group…),
@@ -234,7 +236,22 @@ trait IndexItem: Sized {
 ```
 
 Mwmbl's `Document` becomes one implementation, which keeps the crate upstreamable. `has_term`
-and `read_index_page` take the term position from the type.
+and `read_index_page` take the term position from the type. The trait also has
+`fn term(&self) -> Option<&str>`, since `add` groups items by their term's page.
+
+`SocialPost` and `SocialAccount` live in `social_index`, not `tinyindex`, so `tinyindex` keeps
+no fediverse knowledge.
+
+**`tinyindex` API decisions:**
+- `TinyIndex<T>` is a cheap-to-clone read handle (`retrieve`, `read_page`, `pages`).
+  `IndexWriter<T>` is not `Clone` and its mutators (`add`, `remove`, `write_page`,
+  `reset_page`) take `&mut self`, so the single writer task is the only owner of one.
+- Merging onto a page deduplicates by (`url`, `term`). `remove(url, terms)` drops every copy
+  of `url` from those terms' pages, whatever term the copy carries.
+- A page that won't decode is an error for the writer, never an empty page to merge onto.
+  Readers retry it a few times, since the writer may be mid-write.
+- The tokeniser version is an optional `tokenizer_version` key in the metadata JSON. It is
+  omitted when unset, so `Document` indexes keep the exact header Mwmbl's Python reads.
 
 Tuple layouts, with required fields first and optional ones last so they can be truncated:
 
@@ -366,7 +383,8 @@ Doing this early is part of Stage 0's done criteria.
    - Keep it free of fediverse knowledge. URI lookup, re-tokenising and tombstones live a
      layer up.
    - Make it generic over `IndexItem`, with `term` position and `item_factory` per type.
-     Implement `SocialPost` and `SocialAccount`, plus Mwmbl's `Document` to keep it compatible.
+     Implement Mwmbl's `Document` to keep it compatible; `SocialPost` and `SocialAccount`
+     go in `social_index`.
    - Add a compatibility test: a page written by Mwmbl's Python reads back identically as
      `Document`.
 3. `tokenize` crate, with tests covering English, German, Japanese and hashtags.

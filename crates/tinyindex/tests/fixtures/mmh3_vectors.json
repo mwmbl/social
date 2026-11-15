@@ -1,0 +1,74 @@
+[
+ {
+  "key": "",
+  "hash": 0,
+  "page_65536": 0,
+  "page_1000": 0
+ },
+ {
+  "key": "a",
+  "hash": 1009084850,
+  "page_65536": 27058,
+  "page_1000": 850
+ },
+ {
+  "key": "rust",
+  "hash": 3968414394,
+  "page_65536": 12986,
+  "page_1000": 394
+ },
+ {
+  "key": "hello world",
+  "hash": 1586663183,
+  "page_65536": 36623,
+  "page_1000": 183
+ },
+ {
+  "key": "uri:https://example.social/users/alice/statuses/1",
+  "hash": 277855395,
+  "page_65536": 48291,
+  "page_1000": 395
+ },
+ {
+  "key": "#rust",
+  "hash": 266865545,
+  "page_65536": 2953,
+  "page_1000": 545
+ },
+ {
+  "key": "über",
+  "hash": 2684790572,
+  "page_65536": 42796,
+  "page_1000": 572
+ },
+ {
+  "key": "日本語",
+  "hash": 2779017879,
+  "page_65536": 29335,
+  "page_1000": 879
+ },
+ {
+  "key": "😀 emoji",
+  "hash": 2448033982,
+  "page_65536": 2238,
+  "page_1000": 982
+ },
+ {
+  "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "hash": 2716186120,
+  "page_65536": 46600,
+  "page_1000": 120
+ },
+ {
+  "key": "Mixed Case",
+  "hash": 3888978072,
+  "page_65536": 6296,
+  "page_1000": 72
+ },
+ {
+  "key": "mwmbl",
+  "hash": 4064513103,
+  "page_65536": 35919,
+  "page_1000": 103
+ }
+]

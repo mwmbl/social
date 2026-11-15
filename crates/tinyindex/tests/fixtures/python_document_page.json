@@ -1,0 +1,46 @@
+[
+ [
+  "Rust Programming Language",
+  "https://www.rust-lang.org/",
+  "A language empowering everyone",
+  0.1,
+  "rust"
+ ],
+ [
+  "Title",
+  "https://example.com/a",
+  "Extract",
+  12.5,
+  "rust",
+  7,
+  [
+   1,
+   2
+  ],
+  1700000000,
+  3
+ ],
+ [
+  "",
+  "https://example.com/b",
+  "No title",
+  null,
+  "rust",
+  null,
+  null,
+  1700000001
+ ],
+ [
+  "Unicode ü 日本",
+  "https://example.com/c",
+  "é",
+  1e-07,
+  "other"
+ ],
+ [
+  "No term",
+  "https://example.com/d",
+  "x",
+  2.0
+ ]
+]
