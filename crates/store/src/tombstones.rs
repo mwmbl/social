@@ -16,6 +16,33 @@ pub struct Tombstone {
 }
 
 impl Store {
+    /// Permanently forget a URI (object or actor), as `mwmbl-social forget` does. Unlike a
+    /// tombstone, this is never cleared by the sweep.
+    pub fn add_forgotten(&self, uri: &str, now: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT INTO forgotten (uri, created_at) VALUES (?1, ?2) ON CONFLICT (uri) DO NOTHING",
+                params![uri, now],
+            )
+            .map_err(ctx(format!("forget {uri}")))?;
+        Ok(())
+    }
+
+    /// Every forgotten URI.
+    pub fn list_forgotten(&self) -> Result<Vec<String>, StoreError> {
+        let op = "list forgotten";
+        let mut stmt = self
+            .conn
+            .prepare("SELECT uri FROM forgotten ORDER BY uri")
+            .map_err(ctx(op))?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(ctx(op))?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(ctx(op))?;
+        Ok(rows)
+    }
+
     /// Adds a tombstone. Re-adding the same `(uri, kind)` refreshes `created_at`.
     pub fn add_tombstone(
         &self,
@@ -51,6 +78,18 @@ impl Store {
         .map_err(ctx(op))
     }
 
+    /// Removes one tombstone. Returns whether it existed.
+    pub fn remove_tombstone(&self, uri: &str, kind: TombstoneKind) -> Result<bool, StoreError> {
+        let changed = self
+            .conn
+            .execute(
+                "DELETE FROM tombstones WHERE uri = ?1 AND kind = ?2",
+                params![uri, kind],
+            )
+            .map_err(ctx(format!("remove {kind} tombstone {uri}")))?;
+        Ok(changed > 0)
+    }
+
     /// Deletes tombstones created strictly before `t`; returns how many.
     pub fn clear_tombstones_before(&self, t: i64) -> Result<usize, StoreError> {
         self.conn
@@ -61,6 +100,18 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn forgotten_is_permanent_and_idempotent() {
+        let store = Store::open_in_memory().unwrap();
+        store.add_forgotten("https://h.example/u/a", 1).unwrap();
+        store.add_forgotten("https://h.example/u/a", 2).unwrap();
+        store
+            .add_tombstone("https://h.example/s/1", TombstoneKind::Object, 1)
+            .unwrap();
+        assert_eq!(store.clear_tombstones_before(100).unwrap(), 1);
+        assert_eq!(store.list_forgotten().unwrap(), ["https://h.example/u/a"]);
+    }
+
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -87,6 +138,19 @@ mod tests {
                 },
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_one_kind() -> TestResult {
+        let s = Store::open_in_memory()?;
+        s.add_tombstone("a", TombstoneKind::Object, 10)?;
+        s.add_tombstone("a", TombstoneKind::Author, 10)?;
+        assert!(s.remove_tombstone("a", TombstoneKind::Author)?);
+        assert!(!s.remove_tombstone("a", TombstoneKind::Author)?);
+        let left = s.list_tombstones()?;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left.first().map(|t| t.kind), Some(TombstoneKind::Object));
         Ok(())
     }
 

@@ -40,11 +40,22 @@ httpdate = "1.0.3"
 # headers and extracts scheme and host; reqwest already depends on it. tokio needs `sync` and
 # `time` for the per-host semaphores and the minimum request interval; axum is a dev-dependency
 # for the in-process fake ActivityPub host.
-tokio = { version = "1.54.1", features = ["sync", "time"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 url = "2.5.8"
 tracing = "0.1.44"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+
+# The `mwmbl_social` binary. clap (derive + env, for `MWMBL_SOCIAL_CONFIG`) is the CLI; anyhow
+# is for error plumbing in the binary only (libraries use thiserror); toml reads the config
+# file; tracing-subscriber (env-filter + fmt) turns `tracing` events into stderr logs. tokio
+# gains the runtime, macros, signal and net features for the server, the workers and the
+# integration tests. reqwest (already pulled in by `apub`) does the one WebFinger lookup that
+# `forget <acct>` needs; `apub::fetch` only accepts ActivityPub documents with an `id`.
+clap = { version = "4.6.7", features = ["derive", "env"] }
+anyhow = "1.0.104"
+toml = "1.2.1"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
 # Page packing compresses and serialises a page a dozen times per write; unoptimised
 # serde_json makes index tests crawl. Optimise dependencies even in dev builds.

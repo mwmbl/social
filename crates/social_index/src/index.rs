@@ -35,6 +35,22 @@ pub struct SocialReader<T: Keyed> {
 }
 
 impl<T: Keyed> SocialReader<T> {
+    /// Open an existing index read-only, refusing one built with another key scheme (as
+    /// [`SocialIndex::open`] does). Needs no writer lock: this never writes.
+    pub fn open(path: &Path, scheme: &KeyScheme) -> Result<Self, SocialIndexError> {
+        let index = TinyIndex::<T>::open(path)?;
+        let found = index.metadata().tokenizer.clone();
+        let expected = scheme.id();
+        if found.as_deref() != Some(expected.as_str()) {
+            return Err(SocialIndexError::KeyScheme {
+                path: path.display().to_string(),
+                expected,
+                found,
+            });
+        }
+        Ok(Self { index })
+    }
+
     /// The copies stored under `key`.
     pub fn retrieve(&self, key: &str) -> Result<Vec<T>, IndexError> {
         self.index.retrieve(key)

@@ -13,4 +13,6 @@
 // As in mwmbl_core: every public fn here returns Result, and the error types say what failed.
 #![allow(clippy::missing_errors_doc)]
 
-fn main() {}
+fn main() -> anyhow::Result<()> {
+    mwmbl_social::cli::main()
+}

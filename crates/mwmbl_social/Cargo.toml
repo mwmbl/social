@@ -6,17 +6,32 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "mwmbl_social"
+path = "src/lib.rs"
+
 [[bin]]
 name = "mwmbl-social"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
 apub.workspace = true
+axum.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 social_index.workspace = true
 store.workspace = true
+thiserror.workspace = true
 tinyindex.workspace = true
 tokenize.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

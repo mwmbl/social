@@ -4,7 +4,8 @@
 //! Every table is bounded by registrations, hosts or a fixed time window. None has a row per
 //! document or account, and none holds term lists (CLAUDE.md principle 1).
 
-pub(crate) const MIGRATIONS: &[&str] = &["
+pub(crate) const MIGRATIONS: &[&str] = &[
+    "
 CREATE TABLE registrations (
     id               INTEGER PRIMARY KEY,
     base_url         TEXT NOT NULL UNIQUE,
@@ -86,4 +87,13 @@ CREATE TABLE sweep_state (
     last_sweep_started_at    INTEGER,
     last_sweep_finished_at   INTEGER
 );
-"];
+",
+    "
+-- Admin `forget <uri>`: permanent, unlike tombstones, which sweeps clear. Bounded by admin
+-- actions, not by the index.
+CREATE TABLE forgotten (
+    uri        TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+);
+",
+];

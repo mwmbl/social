@@ -15,5 +15,23 @@
 // As in mwmbl_core: every public fn here returns Result, and the error types say what failed.
 #![allow(clippy::missing_errors_doc)]
 
+pub mod cli;
+pub mod config;
 pub mod decide;
+pub mod http;
+pub mod keys;
 pub mod records;
+pub mod search;
+pub mod sweep;
+pub mod worker;
+pub mod writer;
+
+/// The current time in Unix seconds.
+#[must_use]
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .unwrap_or(0)
+}

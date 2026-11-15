@@ -47,6 +47,28 @@ impl Store {
             .map_err(ctx(format!("read host {host}")))
     }
 
+    /// Every host we hold state for.
+    pub fn list_hosts(&self) -> Result<Vec<Host>, StoreError> {
+        let op = "list hosts";
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT host, signature_scheme, backoff_until, blocked FROM hosts ORDER BY host",
+            )
+            .map_err(ctx(op))?;
+        stmt.query_map([], |r| {
+            Ok(Host {
+                host: r.get(0)?,
+                signature_scheme: r.get(1)?,
+                backoff_until: r.get(2)?,
+                blocked: r.get(3)?,
+            })
+        })
+        .map_err(ctx(op))?
+        .collect::<Result<_, _>>()
+        .map_err(ctx(op))
+    }
+
     pub fn set_signature_scheme(
         &self,
         host: &str,
@@ -164,6 +186,8 @@ mod tests {
         // Backoff on a host with nothing else recorded.
         s.set_backoff("b.example", 9)?;
         assert_eq!(s.host("b.example")?.and_then(|h| h.signature_scheme), None);
+        let hosts: Vec<String> = s.list_hosts()?.into_iter().map(|h| h.host).collect();
+        assert_eq!(hosts, ["a.example", "b.example"]);
         Ok(())
     }
 

@@ -168,6 +168,13 @@ we only need a fixed component set.
   subscription/backfill management.
 - **All index writes go through one writer task**, fed by a channel. That avoids the fcntl page
   locks Mwmbl uses for multiple processes.
+- **Across processes** the writer holds an exclusive lock on `{data_dir}/writer.lock`
+  (`File::try_lock`); `serve` refuses to start if it is held. `ingest` and `forget` run
+  in-process (own writer and fetcher) when the lock is free. When a server holds it they only
+  write SQLite (`ingest` enqueues an `announce`; `forget` writes tombstone and domain-block
+  rows), and the server's writer reloads tombstones and domain blocks from SQLite every 30
+  seconds; the sweep then removes the copies. `search` and `stats` open the indexes read-only
+  and need no lock.
 - Readers use positioned reads concurrently. If a read hits a page mid-write, it gets a
   `PageIoError::Unreadable` and retries. A sharded `RwLock` per page range is the alternative if
   retries prove noisy.
@@ -218,6 +225,7 @@ and hosts, or by a fixed time window.
   - Expect thousands of rows, not millions.
   - Rows are cleared once a full sweep that started after them has finished, so it holds at
     most about one sweep period of entries.
+- **`forgotten`**: URIs an admin forgot. Permanent, and bounded by admin actions.
 - **`sweep_state`**: the sweep's current page, and when the current and last sweeps started.
 
 Never store non-public objects, anywhere.
@@ -357,6 +365,12 @@ any page, including on crowded indexes where `uri:` lookups miss.
 - Records that dropped off every page are simply gone. That is the index's normal lossiness,
   and it's fine.
 - Clear tombstones older than the start of the last completed sweep.
+  - Tombstones apply to both indexes, so the cutoff is the older of the two indexes' last
+    completed sweep start: a tombstone is cleared only once both indexes have finished a full
+    pass that began after it was made. A pass that was already running when it was made does
+    not count.
+  - A page that fails to read is logged with its number and skipped (never reset), so one bad
+    page doesn't stall the pass; its tombstones are applied on the next pass.
 
 **What triggers a delete:**
 
@@ -368,7 +382,14 @@ any page, including on crowded indexes where `uri:` lookups miss.
   tombstone covers posts only. If the account is no longer discoverable, its own record is also
   deleted by URI; if it is still discoverable but not indexable, the account stays searchable.
 - a domain block, applied by search-time filtering and the sweep
-- an admin CLI command `mwmbl-social forget <uri|acct|domain>`
+- an admin CLI command `mwmbl-social forget <uri|acct|domain>`. A forgotten URI goes in a
+  permanent `forgotten` table as well as the tombstones, so it is never indexed again after the
+  sweep clears its tombstone rows. A forgotten domain is a domain block, also permanent.
+
+**Re-indexing clears an object tombstone.** If a post was made unlisted (removed and
+tombstoned) and then public again, the fresh consented fetch clears its object tombstone.
+Otherwise the sweep would delete the post that now has consent. Forgotten URIs and authors are
+never re-indexed.
 
 **Updates** delete the old record (found by URI lookup) and then add the new one, because the
 terms may have changed. Updates and lifecycle events rewrite `checked`, which covers the
