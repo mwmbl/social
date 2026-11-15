@@ -12,3 +12,194 @@
 )]
 // As in mwmbl_core: every public fn here returns Result, and the error types say what failed.
 #![allow(clippy::missing_errors_doc)]
+//! SQLite operational state for Mwmbl Social.
+//!
+//! Holds bounded state only: registrations, subscriptions, the fetch queue, hosts, tombstones
+//! and the sweep position. It never holds a row per document or per account, and never term
+//! lists: the index is the only record of what is indexed.
+//!
+//! The API is synchronous. Time is always passed in as `now` (Unix seconds); nothing here reads
+//! the clock.
+
+mod enums;
+mod error;
+mod hosts;
+mod queue;
+mod registrations;
+mod schema;
+mod subscriptions;
+mod sweep;
+mod tombstones;
+
+use std::path::Path;
+use std::time::Duration;
+
+use rusqlite::Connection;
+
+pub use enums::{
+    BackfillState, Category, FetchKind, FetchReason, RegistrationStatus, SignatureScheme,
+    SubscriptionType, TombstoneKind,
+};
+pub use error::StoreError;
+pub use hosts::{DomainBlock, Host};
+pub use queue::{EnqueueOutcome, NewFetch, QueuedFetch};
+pub use registrations::{NewRegistration, Registration};
+pub use subscriptions::{Backfill, Subscription};
+pub use sweep::SweepState;
+pub use tombstones::Tombstone;
+
+use error::ctx;
+
+/// Number of migrations this build knows; the `user_version` of an up-to-date database.
+pub const SCHEMA_VERSION: usize = schema::MIGRATIONS.len();
+
+/// Handle to the SQLite database. Not `Sync`: use one per thread, or keep it on the dedicated
+/// blocking thread.
+#[derive(Debug)]
+pub struct Store {
+    conn: Connection,
+}
+
+impl Store {
+    /// Opens (creating if needed) the database at `path`, enables WAL, foreign keys and a 5 s
+    /// busy timeout, and runs pending migrations.
+    pub fn open(path: &Path) -> Result<Self, StoreError> {
+        let conn =
+            Connection::open(path).map_err(ctx(format!("open database {}", path.display())))?;
+        Self::init(conn, &path.display().to_string())
+    }
+
+    /// Opens a private in-memory database. For tests.
+    pub fn open_in_memory() -> Result<Self, StoreError> {
+        let conn = Connection::open_in_memory().map_err(ctx("open in-memory database"))?;
+        Self::init(conn, ":memory:")
+    }
+
+    fn init(conn: Connection, name: &str) -> Result<Self, StoreError> {
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(ctx(format!("set busy timeout on {name}")))?;
+        conn.pragma_update(None, "foreign_keys", true)
+            .map_err(ctx(format!("enable foreign keys on {name}")))?;
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
+            .map_err(ctx(format!("enable WAL on {name}")))?;
+        let store = Self { conn };
+        store.migrate(name)?;
+        Ok(store)
+    }
+
+    fn migrate(&self, name: &str) -> Result<(), StoreError> {
+        let found = self.schema_version()?;
+        if found > SCHEMA_VERSION {
+            return Err(StoreError::SchemaTooNew {
+                found,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        for (i, sql) in schema::MIGRATIONS.iter().enumerate().skip(found) {
+            let op = format!("migration {} on {name}", i + 1);
+            let tx = self.conn.unchecked_transaction().map_err(ctx(op.clone()))?;
+            tx.execute_batch(sql).map_err(ctx(op.clone()))?;
+            // PRAGMA values cannot be bound; `i + 1` is a usize we produced.
+            tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))
+                .map_err(ctx(op.clone()))?;
+            tx.commit().map_err(ctx(op))?;
+        }
+        Ok(())
+    }
+
+    /// The schema version recorded in the database.
+    pub fn schema_version(&self) -> Result<usize, StoreError> {
+        let v: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(ctx("read schema version"))?;
+        error::to_usize(v, "read schema version")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn open_sets_pragmas_and_version() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("s.db"))?;
+        assert_eq!(store.schema_version()?, SCHEMA_VERSION);
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        assert_eq!(mode, "wal");
+        let fk: i64 = store
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+        assert_eq!(fk, 1);
+        let timeout: i64 = store
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
+        assert_eq!(timeout, 5000);
+        Ok(())
+    }
+
+    #[test]
+    fn reopen_is_idempotent_and_keeps_data() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("s.db");
+        {
+            let store = Store::open(&path)?;
+            store.add_domain_block("Example.com.", 1)?;
+        }
+        let store = Store::open(&path)?;
+        assert_eq!(store.schema_version()?, SCHEMA_VERSION);
+        assert_eq!(store.list_domain_blocks()?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn in_memory_is_current() -> TestResult {
+        let store = Store::open_in_memory()?;
+        assert_eq!(store.schema_version()?, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[test]
+    fn newer_database_is_refused() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("s.db");
+        {
+            let store = Store::open(&path)?;
+            store
+                .conn
+                .execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 1))?;
+        }
+        assert!(matches!(
+            Store::open(&path),
+            Err(StoreError::SchemaTooNew { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn open_error_names_the_path() {
+        let err = Store::open(Path::new("/nonexistent-dir-xyz/s.db"));
+        assert!(err.is_err_and(|e| e.to_string().contains("/nonexistent-dir-xyz/s.db")));
+    }
+
+    #[test]
+    fn unknown_enum_in_db_is_an_error_not_a_panic() -> TestResult {
+        let store = Store::open_in_memory()?;
+        store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        store.conn.execute(
+            "INSERT INTO registrations (base_url, server_id, our_private_key, status, created_at)
+             VALUES ('https://a', 's', x'00', 'weird', 0)",
+            [],
+        )?;
+        let err = store.list_registrations();
+        assert!(matches!(err, Err(StoreError::UnknownValue { value, .. }) if value == "weird"));
+        Ok(())
+    }
+}

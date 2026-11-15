@@ -16,6 +16,7 @@ serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 thiserror = "2.0.21"
 zstd = "0.13"
 tempfile = "3.27.0"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 
 tinyindex = { path = "crates/tinyindex" }
 tokenize = { path = "crates/tokenize" }
