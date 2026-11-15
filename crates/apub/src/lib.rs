@@ -1,3 +1,5 @@
+//! `ActivityPub` client: signatures, signed fetches, object parsing and consent.
+
 #![deny(
     clippy::exit,
     clippy::expect_used,
@@ -12,3 +14,5 @@
 )]
 // As in mwmbl_core: every public fn here returns Result, and the error types say what failed.
 #![allow(clippy::missing_errors_doc)]
+
+pub mod consent;

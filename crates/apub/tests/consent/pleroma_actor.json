@@ -1,0 +1,23 @@
+{
+  "@context": ["https://www.w3.org/ns/activitystreams", "https://pleroma.example/schemas/litepub-0.1.jsonld", {"@language": "und"}],
+  "alsoKnownAs": [],
+  "attachment": [],
+  "capabilities": {"acceptsChatMessages": true},
+  "discoverable": true,
+  "endpoints": {"oauthAuthorizationEndpoint": "https://pleroma.example/oauth/authorize", "sharedInbox": "https://pleroma.example/inbox"},
+  "featured": "https://pleroma.example/users/dave/collections/featured",
+  "followers": "https://pleroma.example/users/dave/followers",
+  "following": "https://pleroma.example/users/dave/following",
+  "id": "https://pleroma.example/users/dave",
+  "inbox": "https://pleroma.example/users/dave/inbox",
+  "manuallyApprovesFollowers": false,
+  "name": "Dave",
+  "outbox": "https://pleroma.example/users/dave/outbox",
+  "preferredUsername": "dave",
+  "publicKey": {"id": "https://pleroma.example/users/dave#main-key", "owner": "https://pleroma.example/users/dave", "publicKeyPem": "..."},
+  "summary": "Coffee",
+  "tag": [],
+  "type": "Person",
+  "url": "https://pleroma.example/users/dave",
+  "vcard:bday": null
+}

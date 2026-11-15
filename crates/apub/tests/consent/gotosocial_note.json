@@ -1,0 +1,18 @@
+{
+  "@context": ["https://gotosocial.org/ns", "https://www.w3.org/ns/activitystreams"],
+  "attachment": [],
+  "attributedTo": "https://gts.example/users/bob",
+  "cc": "https://gts.example/users/bob/followers",
+  "content": "<p>The night train to Vienna is lovely.</p>",
+  "contentMap": {"en": "<p>The night train to Vienna is lovely.</p>"},
+  "id": "https://gts.example/users/bob/statuses/01HXYZ",
+  "interactionPolicy": {"canLike": {"always": ["https://www.w3.org/ns/activitystreams#Public"]}},
+  "published": "2026-11-02T08:00:00Z",
+  "replies": {"id": "https://gts.example/users/bob/statuses/01HXYZ/replies", "type": "Collection"},
+  "sensitive": false,
+  "summary": "",
+  "tag": [],
+  "to": "https://www.w3.org/ns/activitystreams#Public",
+  "type": "Note",
+  "url": "https://gts.example/@bob/statuses/01HXYZ"
+}

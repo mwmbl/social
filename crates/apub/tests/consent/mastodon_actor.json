@@ -1,0 +1,23 @@
+{
+  "@context": ["https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1",
+    {"manuallyApprovesFollowers": "as:manuallyApprovesFollowers", "toot": "http://joinmastodon.org/ns#",
+     "discoverable": "toot:discoverable", "indexable": "toot:indexable", "memorial": "toot:memorial"}],
+  "id": "https://mastodon.example/users/alice",
+  "type": "Person",
+  "following": "https://mastodon.example/users/alice/following",
+  "followers": "https://mastodon.example/users/alice/followers",
+  "inbox": "https://mastodon.example/users/alice/inbox",
+  "outbox": "https://mastodon.example/users/alice/outbox",
+  "preferredUsername": "alice",
+  "name": "Alice",
+  "summary": "<p>Rust and gardens.</p>",
+  "url": "https://mastodon.example/@alice",
+  "manuallyApprovesFollowers": false,
+  "discoverable": true,
+  "indexable": true,
+  "published": "2022-11-01T00:00:00Z",
+  "memorial": false,
+  "publicKey": {"id": "https://mastodon.example/users/alice#main-key", "owner": "https://mastodon.example/users/alice",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIIB...\n-----END PUBLIC KEY-----\n"},
+  "endpoints": {"sharedInbox": "https://mastodon.example/inbox"}
+}

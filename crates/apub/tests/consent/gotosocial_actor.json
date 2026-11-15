@@ -1,0 +1,20 @@
+{
+  "@context": ["https://w3id.org/security/v1", "https://www.w3.org/ns/activitystreams",
+    {"discoverable": "toot:discoverable", "indexable": "toot:indexable", "toot": "http://joinmastodon.org/ns#"}],
+  "discoverable": true,
+  "indexable": true,
+  "endpoints": {"sharedInbox": "https://gts.example/sharedInbox"},
+  "featured": "https://gts.example/users/bob/collections/featured",
+  "followers": "https://gts.example/users/bob/followers",
+  "following": "https://gts.example/users/bob/following",
+  "id": "https://gts.example/users/bob",
+  "inbox": "https://gts.example/users/bob/inbox",
+  "manuallyApprovesFollowers": true,
+  "name": "Bob",
+  "outbox": "https://gts.example/users/bob/outbox",
+  "preferredUsername": "bob",
+  "publicKey": {"id": "https://gts.example/users/bob/main-key", "owner": "https://gts.example/users/bob", "publicKeyPem": "..."},
+  "summary": "<p>Trains.</p>",
+  "type": "Person",
+  "url": "https://gts.example/@bob"
+}

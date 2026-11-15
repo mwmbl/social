@@ -1,0 +1,17 @@
+{
+  "@context": ["https://www.w3.org/ns/activitystreams", "https://pleroma.example/schemas/litepub-0.1.jsonld", {"@language": "und"}],
+  "actor": "https://pleroma.example/users/dave",
+  "attachment": [],
+  "attributedTo": "https://pleroma.example/users/dave",
+  "cc": ["https://pleroma.example/users/dave/followers"],
+  "content": "Third coffee of the morning",
+  "context": "https://pleroma.example/contexts/abc",
+  "conversation": "https://pleroma.example/contexts/abc",
+  "id": "https://pleroma.example/objects/5f2b",
+  "published": "2026-11-04T07:00:00.000Z",
+  "sensitive": false,
+  "summary": "",
+  "tag": [],
+  "to": ["https://www.w3.org/ns/activitystreams#Public"],
+  "type": "Note"
+}
