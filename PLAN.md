@@ -88,7 +88,7 @@ my last knowledge FASP support was experimental (`EXPERIMENTAL_FEATURES=fasp`).
 
 ## What we reuse from Mwmbl
 
-Source: `../mwmbl/rust/mwmbl_core`. PR mwmbl/mwmbl#645 only touches the crawler, not the index.
+Source: `rust/mwmbl_core` in github.com/mwmbl/mwmbl. PR mwmbl/mwmbl#645 only touches the crawler, not the index.
 Mwmbl is AGPL-3.0, so this project should be AGPL-3.0 too. That also suits a network service.
 
 - **What exists in Rust:** `mwmbl_core/src/index.rs` handles page I/O. A page is a zstd frame
@@ -463,6 +463,32 @@ removes them on delete.
 
 Mwmbl integration is a separate track. It can start any time after Stage 1, once there is real
 content: an authenticated search API for Mwmbl, and a decision on merging and ranking.
+
+## Working method
+
+An Opus session orchestrates the work, and subagents do most of the implementation.
+
+- **Opus defines each stage before it is built.** It fixes the trait signatures and writes the
+  acceptance tests, then hands out small tasks of the form "make these pass". Each task covers
+  one crate or one endpoint group and has a clear done check: the `CLAUDE.md` gate.
+- **Sonnet does most of the implementation:** HTTP handlers, the SQLite schema and queries, the
+  CLI, config, the page-code port, and FASP endpoints from the spec.
+- **Opus writes these itself, or writes their tests first,** because mistakes in them are quiet
+  and costly:
+  - consent evaluation and its table of real-world JSON samples;
+  - the deletion and sweep core: URI lookup, re-tokenising, tombstones, sweep deduplication,
+    and a property test that deleted documents leave no trace on any page;
+  - the `IndexItem` trait and tuple layouts.
+- **Review:** Opus reviews every change in those areas before anything builds on it. Other work
+  gets periodic review.
+- **Open-ended interop debugging goes to Opus or the human,** not a looping subagent. That means
+  signature mismatches against a real Mastodon, nodeinfo quirks and registration failures.
+- **`PLAN.md` stays current.** When a decision changes, Opus updates `PLAN.md` in the same
+  change.
+
+**Environment:** Stages 0 to 2 can be built in a cloud session, because every CI test uses
+in-process fakes. End-to-end testing against the Docker Compose Mastodon may need a local
+machine if the cloud sandbox can't run Docker.
 
 ## Testing
 
