@@ -136,7 +136,10 @@ crates/
                 re-tokenising, tombstone filtering, the sweep core. The layer above tinyindex.
   store/        SQLite (rusqlite, WAL, bundled) schema + migrations + queries
   apub/         ActivityPub client: HTTP signatures (RFC 9421 + cavage-12), signed GET,
-                server actor + WebFinger, object parsing (Note/Page/Article/Person/Group…),
+                server actor + WebFinger + NodeInfo (`apub::actor`), signed GET client with per-host
+                state (`apub::fetch`: same-host redirects only, id/origin check, backoff; the
+                binary persists `Fetcher::host_states` into `hosts`), object parsing
+                (`apub::objects`: Note/Page/Article/Person/Group…),
                 consent evaluation
                 (`apub::signatures`: framework-agnostic, operating on a method, a target URI,
                 a header lookup and a status. Fixed component set; RFC 9421 signs ed25519 and
