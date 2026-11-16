@@ -92,12 +92,13 @@ pub enum Effect {
     RemoveAccount { uri: String },
 }
 
-const ACTOR_TYPES: &[&str] = &["Person", "Service", "Group", "Application", "Organization"];
-const POST_TYPES: &[&str] = &["Note", "Article", "Page", "Question"];
+pub(crate) const ACTOR_TYPES: &[&str] =
+    &["Person", "Service", "Group", "Application", "Organization"];
+pub(crate) const POST_TYPES: &[&str] = &["Note", "Article", "Page", "Question"];
 const WRAPPED_ACTIVITIES: &[&str] = &["Create", "Update", "Delete", "Remove", "Undo", "Block"];
 
 /// The `type` values of a JSON object (a string or an array of them).
-fn types(value: &Value) -> Vec<&str> {
+pub(crate) fn types(value: &Value) -> Vec<&str> {
     match value.get("type") {
         Some(Value::String(t)) => vec![t.as_str()],
         Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
@@ -105,12 +106,12 @@ fn types(value: &Value) -> Vec<&str> {
     }
 }
 
-fn is_any(value: &Value, wanted: &[&str]) -> bool {
+pub(crate) fn is_any(value: &Value, wanted: &[&str]) -> bool {
     types(value).iter().any(|t| wanted.contains(t))
 }
 
 /// A reference's id: the string itself, or an embedded object's `id`.
-fn id_of(value: &Value) -> Option<&str> {
+pub(crate) fn id_of(value: &Value) -> Option<&str> {
     match value {
         Value::String(s) => Some(s.as_str()),
         Value::Object(_) => value.get("id").and_then(Value::as_str),
