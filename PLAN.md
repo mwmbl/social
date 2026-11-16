@@ -654,7 +654,9 @@ Lemmy doesn't speak FASP, so content arrives two ways, both through the Activity
 robots.txt on every instance, which disallows only UI and private paths (`/login`, `/settings`,
 `/search`, `/modlog`, `/api`, …) and allows `/post/`, `/comment/` and `/c/`, with
 `Crawl-delay: 60`. There is no `noindex` and no per-user or per-community search opt-out
-(checked in lemmy-ui and lemmy, 2026-11-16). That robots.txt is the admin's indexing consent.
+(checked in lemmy-ui and lemmy, 2026-11-16). That is lemmy-ui `main`; 0.19.13 disallows
+`/search/` (with the slash) and `/inbox` but not `/api` or `/signup`, and indents every line
+after the first (a template literal), which our parser handles. That robots.txt is the admin's indexing consent.
 This does not extend to Mastodon or other microblogging software, whose norms and consent flags
 say no.
 
@@ -862,6 +864,54 @@ indexed. Not resumed after a restart.
   `mwmbl_social_crawl_skipped_total{reason="not_lemmy"|"robots_disallowed"|"robots_unavailable"}`
   and `mwmbl_social_crawl_deferred_total`.
 
+**Status (2026-11-16), end to end against Lemmy 0.19.13** (`dessalines/lemmy:0.19.13`, backend
+only, Postgres 16, in dev/lemmy): the done-when's Lemmy half passes.
+- `follow '!rust@lemmy.test'`: WebFinger, `Follow`, Lemmy's `Accept` (about 25 s later, Lemmy
+  delivers in batches), then the outbox backfill queued both existing posts and `search posts`
+  found them. A new post and a new comment arrived as `Announce{Create}` and were indexed.
+  `unfollow` was accepted too.
+- carol deleting her post, an admin's `/api/v3/post/remove` and `/api/v3/comment/remove` each
+  arrived as `Announce{Delete}`, and each removed the document and left an object tombstone.
+  Lemmy then serves the post as a `Tombstone` with 410.
+- Crawl submissions: a post and a comment in a community we don't follow were indexed; `/modlog`
+  and `/search/?q=…` were dropped for robots.txt; the items were fetched 60 s apart
+  (`Crawl-delay`).
+- Item 7 (follow opt-in) was not re-run here; the integration tests cover it.
+
+Fixed in our code (each with a test): our actor was an `Application`, and Lemmy parses a
+follower only as `Person`, `Service` or `Organization`, answering 400 ("unknown variant"), so it
+is now a `Service`. Lemmy answers an RFC 9421 signature with 400 (it only parses cavage-12),
+not 401, and since it ignores signatures on `GET`s a fetch had cached it as RFC 9421, so the
+`Follow` never fell back: a 400 is now retried once with the other scheme and never caches a
+scheme. Captured 0.19.13 objects and the community outbox are fixtures in
+`crates/apub/tests/consent/lemmy019_*.json`.
+
+Lemmy 0.19 behaviour found end to end:
+- The community outbox is one `OrderedCollection` with inline `orderedItems`, each an
+  `Announce{Create{Page}}`, and no paging. It holds posts only, the newest 50 (`FETCH_LIMIT_MAX`), so
+  **comments written before we follow are not backfilled**; only crawl submissions can reach
+  them.
+- Moderator and admin removals are `Delete` (with the reason in `summary`) announced by the
+  community, not `Remove`; `Remove` is only for mods and featured posts.
+- Every new post is also announced directly (`Announce` of the `Page`, for Mastodon), which we
+  ignore as a boost; the `Announce{Create}` is what queues it.
+- Every `Page` carries a `Hashtag` with the community's name (`#rust`, href the post), so the
+  community name is indexed as a hashtag.
+- A comment's `to` is only the public collection, its `cc` the community and the author; a
+  person has no `discoverable` or `indexable`, so the Lemmy consent rule decides.
+- **Comments on a removed post stay served** (200) and so stay indexed: Lemmy sends no delete
+  for them and revalidation finds them. Open: whether to drop a comment whose `inReplyTo`
+  chain reaches a tombstoned post.
+- `GET`s are never required to be signed: `federation_signed_fetch` only makes Lemmy sign its
+  own fetches.
+- Only cavage-12 signatures are accepted on `POST` (400 otherwise). Lemmy signs its deliveries
+  with cavage over `(request-target)`, `host`, `date` and `digest`, which we verify.
+- Lemmy's HTTP client trusts only its compiled-in Mozilla roots (rustls with `webpki-roots`;
+  `SSL_CERT_FILE` is ignored), and outside debug mode it refuses any URL whose host resolves
+  to a private, loopback or link-local address. dev/lemmy works around both (see its README).
+- The backend serves ActivityPub JSON for `/post/…` and `/comment/…` whatever the `Accept`;
+  a real deployment's proxy sends only `Accept: application/…` to it, which ours matches.
+
 ### Stage 4: rest of FASP discovery
 
 1. `trends` (content). We can use the `trends` subscription type of data_sharing as input.
@@ -912,7 +962,8 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
 - **Integration tests:** a fake FASP-speaking server in-process (axum) for registration,
   subscriptions and announcements, plus a fake ActivityPub host serving objects, so CI doesn't
   need Mastodon.
-- **End-to-end:** a Docker Compose Mastodon for manual and scheduled checks.
+- **End-to-end:** Docker Compose environments for manual and scheduled checks: Mastodon
+  (dev/mastodon) and Lemmy (dev/lemmy).
 - **Crawling:** no bulk crawling of real servers in development or tests. Real-server testing
   only goes through registrations and data_sharing with servers whose admins have opted in.
   In production, real-server traffic also includes fetching crawl-submitted Lemmy URIs
