@@ -27,14 +27,16 @@ but not yet in a real deployment.
 
 ## Install
 
-With Docker:
+With Docker, using the image built from `main` (`ghcr.io/mwmbl/social:main`; every commit is
+also tagged `sha-<commit>`):
 
 ```sh
-docker build -t mwmbl-social .
 docker run -d --name mwmbl-social -p 127.0.0.1:8080:8080 -v mwmbl-social:/data \
   -e MWMBL_SOCIAL_BASE_URL=https://search.example.org \
-  mwmbl-social
+  ghcr.io/mwmbl/social:main
 ```
+
+Or build the image yourself with `docker build -t mwmbl-social .`.
 
 Or from source, with Rust 1.100:
 

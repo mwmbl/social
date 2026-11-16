@@ -607,6 +607,11 @@ yet is the UI payoff: Mastodon only adds accounts it doesn't already know, and e
 in the e2e index came from that same Mastodon. Showing it needs a second server whose accounts
 reach us (e.g. a second Mastodon in dev/mastodon sharing data with us), or a real deployment.
 
+**Docker image:** published to GHCR as Mwmbl does (`.github/workflows/build.yml`, a copy of
+Mwmbl's): every push to `main` builds and pushes `ghcr.io/mwmbl/social:main` and
+`:sha-<commit>`; same-repo pull requests push `:pr-<n>`. Install docs are in `README.md`. A
+first external deployment needs a server admin and is left to the human.
+
 ### Stage 3: Lemmy and follow opt-in
 
 Lemmy doesn't speak FASP, so content arrives two ways, both through the ActivityPub objects
