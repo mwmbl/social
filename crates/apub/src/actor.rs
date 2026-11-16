@@ -33,7 +33,11 @@ pub fn server_actor_key_id(base_url: &str) -> String {
     format!("{}#main-key", server_actor_url(base_url))
 }
 
-/// Our `Application` actor, with the public key (SPKI PEM) other servers check signatures with.
+/// Our `Service` actor, with the public key (SPKI PEM) other servers check signatures with.
+///
+/// `Service`, not `Application`: Lemmy 0.19 only parses `Person`, `Service` and `Organization`
+/// as a user, and answers a `Follow` from any other actor type with 400 (seen end to end in
+/// dev/lemmy). Mastodon treats both as a bot.
 #[must_use]
 pub fn server_actor(base_url: &str, username: &str, public_key_pem: &str) -> Value {
     let actor = server_actor_url(base_url);
@@ -43,7 +47,7 @@ pub fn server_actor(base_url: &str, username: &str, public_key_pem: &str) -> Val
             "https://w3id.org/security/v1",
         ],
         "id": actor,
-        "type": "Application",
+        "type": "Service",
         "preferredUsername": username,
         "name": "Mwmbl Social",
         "summary": SUMMARY,
@@ -140,7 +144,8 @@ mod tests {
     fn actor_document() {
         let a = server_actor("https://social.example/", "mwmbl-social", "PEM");
         assert_eq!(a["id"], "https://social.example/actor");
-        assert_eq!(a["type"], "Application");
+        // One of the user types Lemmy 0.19 accepts a Follow from: Person, Service, Organization.
+        assert_eq!(a["type"], "Service");
         assert_eq!(a["preferredUsername"], "mwmbl-social");
         assert_eq!(a["inbox"], "https://social.example/actor/inbox");
         assert_eq!(a["outbox"], "https://social.example/actor/outbox");
