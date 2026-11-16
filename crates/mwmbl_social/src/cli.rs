@@ -29,8 +29,10 @@ use url::Url;
 
 use crate::config::{Config, ENV_CONFIG_PATH};
 use crate::decide::Action;
+use crate::delivery::{self, DeliveryConfig};
 use crate::fasp_app::{FaspApp, MAINTAIN_EVERY};
 use crate::http::{AppState, router};
+use crate::inbox_app::InboxApp;
 use crate::keys::load_or_generate;
 use crate::metrics::{self, MetricsState};
 use crate::now_secs;
@@ -356,6 +358,20 @@ async fn serve_with_lock(
         fasp.clone()
             .run_maintenance(MAINTAIN_EVERY, shutdown_rx.clone()),
     );
+    let (deliveries, delivering) = delivery::start(
+        Arc::clone(&fetcher),
+        DeliveryConfig::default(),
+        shutdown_rx.clone(),
+    );
+    tasks.spawn(delivering);
+    let inbox = InboxApp::new(
+        &base_url,
+        Arc::clone(&fetcher),
+        open_store(&config)?,
+        handle.clone(),
+        deliveries,
+        config.queue_cap,
+    );
     let mut app = router(AppState {
         base_url: base_url.clone(),
         actor_username: config.actor_username.clone(),
@@ -365,7 +381,8 @@ async fn serve_with_lock(
         accounts: accounts.clone(),
         tombstones: handle.tombstones(),
     })
-    .merge(fasp.routes());
+    .merge(fasp.routes())
+    .merge(inbox.routes());
     if config.metrics {
         app = app.merge(metrics::router(Arc::new(MetricsState {
             store: std::sync::Mutex::new(open_store(&config)?),
@@ -851,6 +868,11 @@ fn stats(config: &Config) -> anyhow::Result<Value> {
         },
         "domain_blocks": store.list_domain_blocks()?.len(),
         "follow_optins": store.follow_optins()?.len(),
+        "following": store
+            .count_following()?
+            .into_iter()
+            .map(|(state, n)| (state.as_str().to_owned(), n))
+            .collect::<std::collections::BTreeMap<_, _>>(),
         "registrations": {
             "total": registrations_total,
             "by_status": registrations_by_status,

@@ -147,7 +147,9 @@ crates/
                 binary persists `Fetcher::host_states` into `hosts`), object parsing
                 (`apub::objects`: Note/Page/Article/Person/Group…), a host's nodeinfo
                 `software.name` (`apub::nodeinfo`, through `Fetcher::fetch_document`: same
-                limits, no id/origin check), consent evaluation
+                limits, no id/origin check), signed delivery (`Fetcher::deliver`: POST under
+                the same limits, no redirects), inbox signature and key-owner checks
+                (`apub::inbox`), consent evaluation
                 (`apub::signatures`: framework-agnostic, operating on a method, a target URI,
                 a header lookup and a status. Fixed component set; RFC 9421 signs ed25519 and
                 rsa-v1_5-sha256 and also verifies rsa-pss-sha512; cavage-12 is RSA-SHA256 only,
@@ -241,6 +243,10 @@ explicit user and admin actions.
 - **`follow_optins`**: actor URI, followed_at. Authors who opted in by following our server
   actor (Stage 3). A record of a user action, bounded by those actions like `forgotten` is by
   admin actions. A row goes when the author unfollows.
+- **`following`**: actor URI, inbox, our `Follow` activity's id, state (pending/accepted),
+  created_at. Actors our server actor follows: follow-backs of opt-ins, and (later)
+  communities an admin chose. Bounded by those actions. The id matches the `Accept` and is
+  what our `Undo` names.
 - **`forgotten`**: URIs an admin forgot. Permanent, and bounded by admin actions.
 - **`sweep_state`**: the sweep's current page, and when the current and last sweeps started.
 
@@ -704,8 +710,9 @@ them, except for paths its robots.txt disallows and replies from non-indexable a
 fake actor without `indexable` that follows us gets its public posts indexed, which are removed
 when it unfollows, while one with `indexable: false` stays out.
 
-**Status (2026-11-16): the consent rules of items 5 and 7 are live in the pipeline.** Following
-(inbox, `Follow`/`Undo`, follow-back), crawl submissions and robots.txt are not built yet.
+**Status (2026-11-16): the consent rules of items 5 and 7 are live in the pipeline.** The inbox
+and follow opt-in are built (below). Admin follows of communities, outbox backfill, crawl
+submissions and robots.txt are not built yet.
 - `decide_post`/`decide_account` take the author's `ConsentContext` and use the `_in`
   evaluations. The author tombstone follows `consent::posts_consented` (the effective
   `indexable`), not the parsed flag, so a flagless Lemmy author or follower isn't hidden.
@@ -724,6 +731,57 @@ when it unfollows, while one with `indexable: false` stays out.
 - Lemmy objects: `language` `{"identifier": …}` is mapped when there is no `contentMap` (`und`
   is none); `Page.name` is the title; comments are `Note`s with `inReplyTo`; a community `Group`
   parses as an account. `stats` reports the number of follow opt-ins.
+
+**Inbox (items 1 and 7), `mwmbl_social::inbox_app`:** `POST /actor/inbox` and the shared
+`POST /inbox` (advertised as `endpoints.sharedInbox`) on the main listener.
+- Checked before answering: body at most 256 KiB (413), `application/activity+json` or
+  `ld+json` (415), a JSON object with `actor` and `type` (400). A sender on a blocked domain or
+  forgotten by an admin gets 202 and is ignored, with nothing fetched.
+- Signature (`apub::inbox`): RFC 9421 covering `@method`, `@target-uri` (or `@authority` and
+  `@path`) and `content-digest`, or cavage-12 covering `(request-target)`, `host`, `digest` and
+  `date` or `(created)`; the digest must match the body and the time be within an hour. The
+  target URI is `base_url` plus the request path. The `keyId` must be on the actor's origin
+  (otherwise it is not fetched). The key is fetched with a signed `GET`, found in the actor's
+  `publicKey` (object or array) or a key document with an `owner`, and its owner must be the
+  activity's `actor`, on the key's own origin. Otherwise 401. Keys are cached in memory for an
+  hour; a cached key that fails is refetched once (rotation). A `Delete` of an actor by itself
+  whose key (`<actor>#…`) answers 404/410 is taken as the account's deletion, since its key is
+  gone with it.
+- Verified deliveries get 202 and are handled on a spawned task. The JSON is never stored,
+  indexed or logged: `activities::handle` (pure, table-tested) turns it into effects, which the
+  binary applies. Objects are queued (kind from the embedded type, reason `announce`, an
+  `Update` 4 minutes out) and fetched from origin; removals go through the writer as
+  `RemovePost`/`RemoveAccount` with a tombstone and `AddAuthorTombstone`.
+- Effects: `Follow` of us records the opt-in, delivers an `Accept` (object: the `Follow`,
+  rebuilt from its id, actor and object), follows back (a `following` row, pending until the
+  `Accept`) and queues the actor. `Undo{Follow}` of us (embedded, or by id from an opted-in
+  actor) drops the opt-in, adds an author tombstone, delivers `Undo{Follow}` for our follow and
+  drops the row, then queues the actor again so one whose own flags consent is shown again.
+  `Accept`/`Reject` of our `Follow` (by id, or embedded from us to them) marks it accepted or
+  drops it. `Create`/`Update` from a followed actor queue the object if it is on the actor's
+  origin or the actor is a followed `Group`. `Announce` from a followed actor unwraps one
+  embedded `Create`/`Update`/`Delete`/`Remove`/`Undo`/`Block`, handled as the community's;
+  boosts are ignored. `Delete` from any verified actor of an object on its origin (or from a
+  followed `Group`) removes it; of the actor itself removes the account. `Remove` from a
+  followed `Group` with `target` the group removes the object (moderators-collection targets
+  are ignored). `Block` with `removeData: true` from a followed `Group` or the blocked user's
+  own instance adds an author tombstone. `Undo{Delete|Remove}` from a followed actor queues the
+  object again. The rest is ignored.
+- A sender's type (is it a `Group`) and inbox come from the key fetch when the key document is
+  the actor, else from a fetch of the actor, cached for an hour. Only an inbox on the actor's
+  origin is delivered to.
+- Delivery (`mwmbl_social::delivery`, `Fetcher::deliver`): signed `POST` with
+  `content-digest` and `Digest`, under the fetcher's per-host limits, backoff and scheme cache
+  (cavage on 401/403). A bounded in-memory task: at most 1024 pending (more are dropped), 8 at
+  once, retried after 30 s, 5 min and 30 min (or the host's backoff), then given up. **Not
+  persistent:** pending deliveries are lost on shutdown. A lost `Accept`, `Follow` or `Undo`
+  is acceptable; the next follow or unfollow sends it again.
+- Our ids: `{actor}/follows/<ms>-<n>`, `{actor}/accepts/<ms>-<n>`, and `<follow id>/undo`.
+  They are not dereferenceable.
+- Our actor says in its `summary` that following it means "index my public posts" and that
+  unfollowing removes them; `manuallyApprovesFollowers` is false; it stays neither
+  `discoverable` nor `indexable`, and anything it sends itself is ignored.
+- `stats` reports `following` by state.
 
 ### Stage 4: rest of FASP discovery
 
