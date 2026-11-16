@@ -1,0 +1,695 @@
+//! The inbox and follow opt-in end to end (PLAN.md Stage 3 items 1 and 7): our full server
+//! (`serve_on`) on a random local port, against fake fediverse hosts that sign their deliveries
+//! and verify ours with our actor's key. Nothing leaves 127.0.0.1.
+
+mod common;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use apub::fetch::SignatureScheme;
+use apub::inbox::{signer, verify_post};
+use apub::signatures::integrity::legacy_digest;
+use apub::signatures::keys::{RsaSigningKey, RsaVerifyingKey, SigningKey};
+use apub::signatures::{authority, cavage, content_digest, http_date, rfc9421};
+use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::extract::{Request, State};
+use axum::http::Response;
+use common::PUBLIC;
+use mwmbl_social::cli::serve_on;
+use mwmbl_social::config::Config;
+use mwmbl_social::now_secs;
+use serde_json::{Value, json};
+use store::{FollowState, Store, TombstoneKind};
+use tokio::sync::watch;
+
+fn fixture(name: &str) -> String {
+    std::fs::read_to_string(format!(
+        "{}/../apub/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+/// Bob's key, and the Lemmy community's: generated once per test run.
+const KEY_A: &str = "generated";
+/// Eve's key, and Carol's.
+const KEY_B: &str = "cavage12_private.pem";
+
+fn signing_key(name: &str) -> RsaSigningKey {
+    static GENERATED: OnceLock<String> = OnceLock::new();
+    let pem = if name == KEY_A {
+        GENERATED
+            .get_or_init(|| RsaSigningKey::generate().unwrap().to_pkcs8_pem().unwrap())
+            .clone()
+    } else {
+        fixture(name)
+    };
+    RsaSigningKey::from_pem(&pem).unwrap()
+}
+
+fn public_pem(name: &str) -> String {
+    signing_key(name).verifying_key().to_spki_pem().unwrap()
+}
+
+async fn wait_until(what: &str, mut check: impl AsyncFnMut() -> bool) {
+    for _ in 0..300 {
+        if check().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// A fake fediverse host
+
+#[derive(Default)]
+struct HostState {
+    docs: Mutex<HashMap<String, Value>>,
+    /// Our actor's public key, to check what we deliver.
+    our_key: Mutex<Option<RsaVerifyingKey>>,
+    /// Deliveries to any `.../inbox` that verified: (path, activity).
+    delivered: Mutex<Vec<(String, Value)>>,
+    /// Deliveries that did not verify.
+    unverified: Mutex<usize>,
+    /// GETs per path.
+    hits: Mutex<HashMap<String, usize>>,
+}
+
+struct FakeHost {
+    origin: String,
+    state: Arc<HostState>,
+}
+
+async fn serve_host(State(state): State<Arc<HostState>>, request: Request) -> Response<Body> {
+    let (parts, body) = request.into_parts();
+    let path = parts.uri.path().to_owned();
+    if parts.method == "POST" {
+        let headers: Vec<(String, String)> = parts
+            .headers
+            .iter()
+            .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap().to_owned()))
+            .collect();
+        let host = parts.headers["host"].to_str().unwrap().to_owned();
+        let target = format!("http://{host}{}", parts.uri);
+        let body = to_bytes(body, 1 << 20).await.unwrap();
+        let key = state.our_key.lock().unwrap().clone().unwrap();
+        let verified = signer(&headers)
+            .is_ok_and(|by| verify_post(&by, &target, &headers, &body, &key, now_secs()).is_ok());
+        if verified {
+            let activity: Value = serde_json::from_slice(&body).unwrap();
+            state.delivered.lock().unwrap().push((path, activity));
+            return Response::builder().status(202).body(Body::empty()).unwrap();
+        }
+        *state.unverified.lock().unwrap() += 1;
+        return Response::builder().status(401).body(Body::empty()).unwrap();
+    }
+    *state.hits.lock().unwrap().entry(path.clone()).or_default() += 1;
+    match state.docs.lock().unwrap().get(&path) {
+        Some(doc) => Response::builder()
+            .status(200)
+            .header("content-type", "application/activity+json")
+            .body(Body::from(doc.to_string()))
+            .unwrap(),
+        None => Response::builder().status(404).body(Body::empty()).unwrap(),
+    }
+}
+
+impl FakeHost {
+    async fn start(software: &str) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let state = Arc::new(HostState::default());
+        let host = Self {
+            origin: origin.clone(),
+            state: Arc::clone(&state),
+        };
+        host.set(
+            "/.well-known/nodeinfo",
+            json!({"links": [{
+                "rel": "http://nodeinfo.diaspora.software/ns/schema/2.1",
+                "href": format!("{origin}/nodeinfo/2.1"),
+            }]}),
+        );
+        host.set(
+            "/nodeinfo/2.1",
+            json!({"version": "2.1", "software": {"name": software, "version": "1.0"}}),
+        );
+        let app = Router::new().fallback(serve_host).with_state(state);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        host
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.origin)
+    }
+
+    fn set(&self, path: &str, doc: Value) {
+        self.state.docs.lock().unwrap().insert(path.to_owned(), doc);
+    }
+
+    /// An actor at `path`, of `kind`, with `extra` fields, its key from fixture `key`.
+    fn actor(&self, path: &str, kind: &str, key: &str, extra: &Value) -> String {
+        let id = self.url(path);
+        let mut doc = json!({
+            "@context": ["https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1"],
+            "id": id,
+            "type": kind,
+            "preferredUsername": path.rsplit('/').next().unwrap(),
+            "name": "Someone",
+            "inbox": format!("{id}/inbox"),
+            "outbox": format!("{id}/outbox"),
+            "publicKey": {"id": format!("{id}#main-key"), "owner": id, "publicKeyPem": public_pem(key)},
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            doc[k] = v.clone();
+        }
+        self.set(path, doc);
+        id
+    }
+
+    fn hits(&self, path: &str) -> usize {
+        self.state
+            .hits
+            .lock()
+            .unwrap()
+            .get(path)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The verified deliveries to `actor`'s inbox, by type.
+    fn delivered_to(&self, actor_path: &str, kind: &str) -> Vec<Value> {
+        let inbox = format!("{actor_path}/inbox");
+        self.state
+            .delivered
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, a)| *path == inbox && a["type"] == kind)
+            .map(|(_, a)| a.clone())
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Our server, and signed deliveries to it
+
+struct Ours {
+    _dir: tempfile::TempDir,
+    config: Config,
+    base: String,
+    http: reqwest::Client,
+    _shutdown: watch::Sender<bool>,
+}
+
+impl Ours {
+    async fn start() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            listen: addr.to_string(),
+            base_url: Some(format!("http://{addr}")),
+            posts_pages: 64,
+            accounts_pages: 64,
+            allow_http: true,
+            ..Config::default()
+        };
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        tokio::spawn(serve_on(config.clone(), listener, shutdown_rx));
+        let ours = Self {
+            _dir: dir,
+            config,
+            base: format!("http://{addr}"),
+            http: reqwest::Client::new(),
+            _shutdown: shutdown,
+        };
+        wait_until("our server to answer", async || {
+            ours.http
+                .get(format!("{}/actor", ours.base))
+                .send()
+                .await
+                .is_ok_and(|r| r.status() == 200)
+        })
+        .await;
+        ours
+    }
+
+    fn actor(&self) -> String {
+        format!("{}/actor", self.base)
+    }
+
+    fn store(&self) -> Store {
+        Store::open(&self.config.store_path()).unwrap()
+    }
+
+    /// Lets `host` check our deliveries with our actor's published key.
+    async fn introduce(&self, host: &FakeHost) {
+        let actor: Value = self
+            .http
+            .get(self.actor())
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .map(|t| serde_json::from_str(&t).unwrap())
+            .unwrap();
+        let pem = actor["publicKey"]["publicKeyPem"].as_str().unwrap();
+        *host.state.our_key.lock().unwrap() = Some(RsaVerifyingKey::from_pem(pem).unwrap());
+    }
+
+    async fn search(&self, q: &str) -> Vec<String> {
+        let results: Vec<Value> = self
+            .http
+            .get(format!("{}/api/v1/search/posts?q={q}", self.base))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .map(|t| serde_json::from_str(&t).unwrap())
+            .unwrap();
+        results
+            .iter()
+            .map(|r| r["uri"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// POSTs `body` to `path`, signed with `key` under `key_id`.
+    async fn post_signed(
+        &self,
+        path: &str,
+        body: &[u8],
+        key_id: &str,
+        key: &str,
+        scheme: SignatureScheme,
+    ) -> u16 {
+        let url = format!("{}{path}", self.base);
+        let now = now_secs();
+        let mut headers = vec![
+            ("host".to_owned(), authority(&url).unwrap()),
+            ("date".to_owned(), http_date(now)),
+            (
+                "content-type".to_owned(),
+                "application/activity+json".to_owned(),
+            ),
+            ("content-digest".to_owned(), content_digest(body)),
+            ("digest".to_owned(), legacy_digest(body)),
+        ];
+        match scheme {
+            SignatureScheme::Rfc9421 => {
+                let (input, signature) = rfc9421::sign_request(
+                    "POST",
+                    &url,
+                    &headers,
+                    &["@method", "@target-uri", "content-digest"],
+                    key_id,
+                    now,
+                    &SigningKey::RsaV15Sha256(signing_key(key)),
+                )
+                .unwrap();
+                headers.push(("signature-input".to_owned(), input));
+                headers.push(("signature".to_owned(), signature));
+            }
+            SignatureScheme::Cavage => {
+                let signature = cavage::sign_request(
+                    "POST",
+                    &url,
+                    &headers,
+                    cavage::POST_HEADERS,
+                    key_id,
+                    &cavage::SignOptions::default(),
+                    &signing_key(key),
+                )
+                .unwrap();
+                headers.push(("signature".to_owned(), signature));
+            }
+        }
+        let mut request = self.http.post(&url).body(body.to_vec());
+        for (name, value) in headers.iter().filter(|(n, _)| n != "host") {
+            request = request.header(name, value);
+        }
+        request.send().await.unwrap().status().as_u16()
+    }
+
+    /// Delivers `activity` to our shared inbox, signed by `actor_id`'s key `key`.
+    async fn deliver(
+        &self,
+        activity: &Value,
+        actor_id: &str,
+        key: &str,
+        scheme: SignatureScheme,
+    ) -> u16 {
+        let body = serde_json::to_vec(activity).unwrap();
+        self.post_signed(
+            "/inbox",
+            &body,
+            &format!("{actor_id}#main-key"),
+            key,
+            scheme,
+        )
+        .await
+    }
+
+    async fn queue_is_empty(&self) -> bool {
+        self.store().queue_len().unwrap() == 0
+    }
+}
+
+fn note(id: &str, author: &str, content: &str) -> Value {
+    json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": id,
+        "type": "Note",
+        "attributedTo": author,
+        "to": [PUBLIC],
+        "cc": [format!("{author}/followers")],
+        "published": "2026-11-10T12:00:00Z",
+        "content": format!("<p>{content}</p>"),
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One scenario, read top to bottom.
+async fn a_flagless_follower_is_indexed_until_it_unfollows() {
+    let ours = Ours::start().await;
+    let gts = FakeHost::start("gotosocial").await;
+    ours.introduce(&gts).await;
+    // GoToSocial-like: no `discoverable` or `indexable` at all.
+    let bob = gts.actor("/users/bob", "Person", KEY_A, &json!({}));
+    let post = gts.url("/users/bob/statuses/1");
+    gts.set(
+        "/users/bob/statuses/1",
+        note(&post, &bob, "Planting kohlrabi beside the greenhouse"),
+    );
+
+    // Bob follows us: an opt-in, an Accept, and a follow back, all checked by the fake.
+    let follow_id = gts.url("/users/bob/follows/1");
+    let follow = json!({"@context": "https://www.w3.org/ns/activitystreams",
+        "id": follow_id, "type": "Follow", "actor": bob, "object": ours.actor()});
+    assert_eq!(
+        ours.deliver(&follow, &bob, KEY_A, SignatureScheme::Rfc9421)
+            .await,
+        202
+    );
+    wait_until("the Accept and our Follow", async || {
+        !gts.delivered_to("/users/bob", "Accept").is_empty()
+            && !gts.delivered_to("/users/bob", "Follow").is_empty()
+    })
+    .await;
+    assert!(ours.store().is_follow_optin(&bob).unwrap());
+    let accept = &gts.delivered_to("/users/bob", "Accept")[0];
+    assert_eq!(accept["actor"], ours.actor());
+    assert_eq!(accept["object"]["id"], follow_id);
+    let our_follow = gts.delivered_to("/users/bob", "Follow")[0].clone();
+    assert_eq!(our_follow["actor"], ours.actor());
+    assert_eq!(our_follow["object"], bob);
+    let row = ours.store().following(&bob).unwrap().unwrap();
+    assert_eq!(row.state, FollowState::Pending);
+    assert_eq!(row.follow_id, our_follow["id"].as_str().unwrap());
+    assert_eq!(*gts.state.unverified.lock().unwrap(), 0);
+
+    // Bob accepts our follow.
+    let accept_ours = json!({"id": gts.url("/users/bob/accepts/1"), "type": "Accept",
+        "actor": bob, "object": our_follow});
+    assert_eq!(
+        ours.deliver(&accept_ours, &bob, KEY_A, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    wait_until("our follow to be accepted", async || {
+        ours.store().following(&bob).unwrap().unwrap().state == FollowState::Accepted
+    })
+    .await;
+
+    // His public post arrives as a Create. What is indexed is what his server serves, not the
+    // text in the delivery.
+    let create = json!({"id": gts.url("/users/bob/statuses/1/activity"), "type": "Create",
+        "actor": bob, "object": note(&post, &bob, "Forged quetzal words")});
+    assert_eq!(
+        ours.deliver(&create, &bob, KEY_A, SignatureScheme::Rfc9421)
+            .await,
+        202
+    );
+    wait_until("the post to be indexed", async || {
+        ours.search("kohlrabi").await == [post.clone()]
+    })
+    .await;
+    assert!(ours.search("quetzal").await.is_empty());
+
+    // Bob unfollows: the opt-in goes, his post disappears, and we unfollow him back.
+    let undo = json!({"id": gts.url("/users/bob/follows/1/undo"), "type": "Undo",
+        "actor": bob, "object": follow});
+    assert_eq!(
+        ours.deliver(&undo, &bob, KEY_A, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    wait_until("the post to be removed", async || {
+        ours.search("kohlrabi").await.is_empty()
+    })
+    .await;
+    wait_until("our Undo", async || {
+        !gts.delivered_to("/users/bob", "Undo").is_empty()
+    })
+    .await;
+    let our_undo = &gts.delivered_to("/users/bob", "Undo")[0];
+    assert_eq!(our_undo["object"]["id"], our_follow["id"]);
+    assert!(!ours.store().is_follow_optin(&bob).unwrap());
+    assert_eq!(ours.store().following(&bob).unwrap(), None);
+    let tombstones = ours.store().list_tombstones().unwrap();
+    assert!(
+        tombstones
+            .iter()
+            .any(|t| t.uri == bob && t.kind == TombstoneKind::Author),
+        "{tombstones:?}"
+    );
+    // The account fetched again after the unfollow is not consented either: it stays out.
+    wait_until("the queue to drain", async || ours.queue_is_empty().await).await;
+    assert!(ours.search("kohlrabi").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_follower_with_indexable_false_stays_out() {
+    let ours = Ours::start().await;
+    let gts = FakeHost::start("gotosocial").await;
+    ours.introduce(&gts).await;
+    let eve = gts.actor(
+        "/users/eve",
+        "Person",
+        KEY_B,
+        &json!({"discoverable": true, "indexable": false}),
+    );
+    let post = gts.url("/users/eve/statuses/1");
+    gts.set(
+        "/users/eve/statuses/1",
+        note(&post, &eve, "Eve grows saffron crocuses"),
+    );
+    let follow = json!({"id": gts.url("/users/eve/follows/1"), "type": "Follow",
+        "actor": eve, "object": ours.actor()});
+    assert_eq!(
+        ours.deliver(&follow, &eve, KEY_B, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    wait_until("the follow to be recorded", async || {
+        ours.store().following(&eve).unwrap().is_some()
+    })
+    .await;
+    assert!(ours.store().is_follow_optin(&eve).unwrap());
+    let create = json!({"type": "Create", "actor": eve, "object": post});
+    assert_eq!(
+        ours.deliver(&create, &eve, KEY_B, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    // The post is fetched from origin and judged there: not indexable.
+    wait_until("the post to be fetched and judged", async || {
+        gts.hits("/users/eve/statuses/1") > 0 && ours.queue_is_empty().await
+    })
+    .await;
+    assert!(ours.search("saffron").await.is_empty());
+}
+
+#[tokio::test]
+async fn forged_deliveries_get_401_and_change_nothing() {
+    let ours = Ours::start().await;
+    let gts = FakeHost::start("gotosocial").await;
+    ours.introduce(&gts).await;
+    let bob = gts.actor("/users/bob", "Person", KEY_A, &json!({}));
+    let eve = gts.actor("/users/eve", "Person", KEY_B, &json!({}));
+    let follow = json!({"id": gts.url("/users/bob/follows/1"), "type": "Follow",
+        "actor": bob, "object": ours.actor()});
+    let body = serde_json::to_vec(&follow).unwrap();
+
+    for scheme in [SignatureScheme::Rfc9421, SignatureScheme::Cavage] {
+        // Bob's key id, but signed with Eve's key.
+        let bad = ours
+            .post_signed("/inbox", &body, &format!("{bob}#main-key"), KEY_B, scheme)
+            .await;
+        assert_eq!(bad, 401, "{scheme:?}: bad signature");
+        // Signed properly by Eve, claiming to be Bob.
+        let impostor = ours
+            .post_signed(
+                "/actor/inbox",
+                &body,
+                &format!("{eve}#main-key"),
+                KEY_B,
+                scheme,
+            )
+            .await;
+        assert_eq!(impostor, 401, "{scheme:?}: signed by another actor");
+    }
+    // A key on another origin is not even fetched.
+    let other = FakeHost::start("gotosocial").await;
+    let mallory = other.actor("/users/mallory", "Person", KEY_A, &json!({}));
+    let foreign = ours
+        .post_signed(
+            "/inbox",
+            &body,
+            &format!("{mallory}#main-key"),
+            KEY_A,
+            SignatureScheme::Cavage,
+        )
+        .await;
+    assert_eq!(foreign, 401);
+    // Unsigned, the wrong media type, and not JSON.
+    let unsigned = ours
+        .http
+        .post(format!("{}/inbox", ours.base))
+        .header("content-type", "application/activity+json")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsigned.status(), 401);
+    let html = ours
+        .http
+        .post(format!("{}/inbox", ours.base))
+        .header("content-type", "text/html")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(html.status(), 415);
+    let garbage = ours
+        .http
+        .post(format!("{}/inbox", ours.base))
+        .header("content-type", "application/activity+json")
+        .body("{not json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(garbage.status(), 400);
+    let huge = ours
+        .http
+        .post(format!("{}/inbox", ours.base))
+        .header("content-type", "application/activity+json")
+        .body(vec![b' '; 300 * 1024])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(huge.status(), 413);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let store = ours.store();
+    assert!(store.follow_optins().unwrap().is_empty());
+    assert_eq!(store.following(&bob).unwrap(), None);
+    assert_eq!(store.queue_len().unwrap(), 0);
+    assert!(gts.state.delivered.lock().unwrap().is_empty());
+    // A properly signed delivery still works afterwards.
+    assert_eq!(
+        ours.deliver(&follow, &bob, KEY_A, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    wait_until("the follow", async || {
+        ours.store().is_follow_optin(&bob).unwrap()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_followed_lemmy_community_relays_posts_and_removals() {
+    let ours = Ours::start().await;
+    let lemmy = FakeHost::start("lemmy").await;
+    ours.introduce(&lemmy).await;
+    let community = lemmy.actor("/c/garden", "Group", KEY_A, &json!({}));
+    let carol = lemmy.actor("/u/carol", "Person", KEY_B, &json!({}));
+    let page = lemmy.url("/post/7");
+    lemmy.set(
+        "/post/7",
+        json!({
+            "@context": ["https://join-lemmy.org/context.json", "https://www.w3.org/ns/activitystreams"],
+            "id": page,
+            "type": "Page",
+            "attributedTo": carol,
+            "to": [community, PUBLIC],
+            "cc": [],
+            "audience": community,
+            "name": "Companion planting with marigolds",
+            "content": "<p>Marigolds keep the aphids away.</p>",
+            "published": "2026-11-10T12:00:00Z",
+        }),
+    );
+    // An admin follows the community (the CLI for that comes later), and it accepted.
+    let store = ours.store();
+    assert!(
+        store
+            .add_following(&community, &format!("{community}/inbox"), "x", now_secs())
+            .unwrap()
+    );
+    store.accept_following(&community).unwrap();
+
+    let announce = |inner: Value| json!({"type": "Announce", "actor": community, "object": inner});
+    let create = json!({"type": "Create", "actor": carol, "to": [PUBLIC],
+        "object": {"id": page, "type": "Page", "name": "Not what is indexed"}});
+    assert_eq!(
+        ours.deliver(
+            &announce(create),
+            &community,
+            KEY_A,
+            SignatureScheme::Cavage
+        )
+        .await,
+        202
+    );
+    wait_until("the page to be indexed", async || {
+        ours.search("marigolds").await == [page.clone()]
+    })
+    .await;
+
+    // A moderator removes it.
+    let remove = json!({"type": "Remove", "actor": lemmy.url("/u/mod"), "object": page,
+        "target": community});
+    assert_eq!(
+        ours.deliver(
+            &announce(remove),
+            &community,
+            KEY_A,
+            SignatureScheme::Rfc9421
+        )
+        .await,
+        202
+    );
+    wait_until("the page to be removed", async || {
+        ours.search("marigolds").await.is_empty()
+    })
+    .await;
+    let tombstones = ours.store().list_tombstones().unwrap();
+    assert!(
+        tombstones
+            .iter()
+            .any(|t| t.uri == page && t.kind == TombstoneKind::Object),
+        "{tombstones:?}"
+    );
+}
