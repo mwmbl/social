@@ -114,9 +114,18 @@ impl Store {
                 .map_err(ctx(op.clone()))?;
                 EnqueueOutcome::Upgraded
             } else {
+                // A request of the same priority can bring the fetch forward but never push it
+                // back: a delete announced after a delayed update must not wait for the
+                // update's delay. A lower-priority request changes nothing.
+                let not_before = if priority == old_priority {
+                    item.not_before.min(old_not_before)
+                } else {
+                    old_not_before
+                };
                 tx.execute(
-                    "UPDATE fetch_queue SET record = COALESCE(record, ?2) WHERE uri = ?1",
-                    params![item.uri, item.record],
+                    "UPDATE fetch_queue SET record = COALESCE(record, ?2), not_before = ?3
+                     WHERE uri = ?1",
+                    params![item.uri, item.record, not_before],
                 )
                 .map_err(ctx(op.clone()))?;
                 EnqueueOutcome::AlreadyQueued
@@ -233,6 +242,26 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_duplicate_brings_the_fetch_forward_but_never_back() {
+        let store = Store::open_in_memory().unwrap();
+        let item = |not_before| NewFetch {
+            uri: "https://h.example/s/1".into(),
+            kind: FetchKind::Object,
+            reason: FetchReason::Announce,
+            record: None,
+            not_before,
+        };
+        store.enqueue(&item(500), 0, 10).unwrap();
+        assert_eq!(
+            store.enqueue(&item(100), 0, 10).unwrap(),
+            EnqueueOutcome::AlreadyQueued
+        );
+        assert_eq!(store.next_due(100, 10).unwrap().len(), 1);
+        store.enqueue(&item(900), 0, 10).unwrap();
+        assert_eq!(store.next_due(100, 10).unwrap().len(), 1, "not pushed back");
+    }
+
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
