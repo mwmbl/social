@@ -19,6 +19,8 @@ pub mod activities;
 pub mod cli;
 pub mod config;
 pub mod context;
+pub mod crawl;
+pub mod crawl_app;
 pub mod decide;
 pub mod delivery;
 pub mod fasp_app;

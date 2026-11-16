@@ -1,6 +1,8 @@
 //! Per-host pacing for the fetch worker: which due queue items to start now, which to leave
-//! queued untouched, and which revalidations to move later so that one host's backlog is laid
-//! out over time instead of filling the worker or hitting the host at the fetcher's full rate.
+//! queued untouched, and which revalidations and crawl submissions to move later so that one
+//! host's backlog is laid out over time instead of filling the worker or hitting the host at
+//! the fetcher's full rate. Crawl submissions are paced at the host's `Crawl-delay` when it asks
+//! for more than the revalidation interval.
 //!
 //! Pure: the worker hands in the due candidates and what is in flight, and applies the
 //! [`Plan`]. Times here are Unix milliseconds; the queue's `not_before` is Unix seconds.
@@ -53,22 +55,27 @@ struct HostPace {
     held_in: u64,
 }
 
-/// Per-host revalidation budget: revalidations to one host start at most once per interval.
-/// In memory only; losing it on restart costs at most one burst of a few fetches per host.
+/// Per-host budgets: revalidations to one host start at most once per interval, and crawl
+/// submissions at most once per the larger of that interval and the host's `Crawl-delay`. The
+/// two are budgeted apart, so a host's crawl backlog does not hold up its revalidations. In
+/// memory only; losing it on restart costs at most one burst of a few fetches per host.
 #[derive(Debug)]
 pub struct Pacer {
     interval_ms: i64,
     hosts: HashMap<String, HostPace>,
+    crawl_hosts: HashMap<String, HostPace>,
     pass: u64,
 }
 
 impl Pacer {
-    /// A zero interval disables the budget.
+    /// A zero interval disables the revalidation budget, and leaves crawl submissions paced by
+    /// `Crawl-delay` alone.
     #[must_use]
     pub fn new(interval: Duration) -> Self {
         Self {
             interval_ms: i64::try_from(interval.as_millis()).unwrap_or(i64::MAX),
             hosts: HashMap::new(),
+            crawl_hosts: HashMap::new(),
             pass: 0,
         }
     }
@@ -76,22 +83,23 @@ impl Pacer {
     /// Call once per loop pass, before asking about that pass's candidates.
     pub fn begin_pass(&mut self, now_ms: i64) {
         self.pass = self.pass.wrapping_add(1);
-        if self.hosts.len() > PACER_HOST_CAP {
-            // A host whose slots have all passed is the same as one never seen.
-            self.hosts
-                .retain(|_, h| h.next_start > now_ms || h.next_free > now_ms);
+        for hosts in [&mut self.hosts, &mut self.crawl_hosts] {
+            if hosts.len() > PACER_HOST_CAP {
+                // A host whose slots have all passed is the same as one never seen.
+                hosts.retain(|_, h| h.next_start > now_ms || h.next_free > now_ms);
+            }
         }
     }
 
-    /// How many hosts are tracked.
+    /// How many hosts are tracked, for revalidation and crawl submissions together.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.hosts.len()
+        self.hosts.len().saturating_add(self.crawl_hosts.len())
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.hosts.is_empty()
+        self.hosts.is_empty() && self.crawl_hosts.is_empty()
     }
 
     /// Decide one due revalidation for `host`. `Start` and `Defer` take a slot. `can_start` is
@@ -99,32 +107,75 @@ impl Pacer {
     /// deferred like one whose slot has not come, so a busy host's backlog still leaves the due
     /// set instead of crowding other hosts out of the candidates.
     pub fn revalidation(&mut self, host: &str, now_ms: i64, can_start: bool) -> Pace {
-        if self.interval_ms <= 0 {
-            return if can_start { Pace::Start } else { Pace::Hold };
-        }
-        let interval = self.interval_ms;
         let pass = self.pass;
-        let h = self.hosts.entry(host.to_owned()).or_default();
-        if can_start && now_ms >= h.next_start {
-            h.next_start = now_ms.saturating_add(interval);
-            return Pace::Start;
-        }
-        let ready = h.next_start.max(now_ms);
-        let held_now = h.held_in == pass;
-        if !held_now && ready.saturating_sub(now_ms) <= HOLD_WINDOW_MS {
-            h.held_in = pass;
-            return Pace::Hold;
-        }
-        // `ready` is taken by the item held this pass, if there is one.
-        let first = if held_now {
-            ready.saturating_add(interval)
-        } else {
-            ready
-        };
-        let slot = h.next_free.max(first);
-        h.next_free = slot.saturating_add(interval);
-        Pace::Defer { until_ms: slot }
+        slot(
+            &mut self.hosts,
+            host,
+            self.interval_ms,
+            pass,
+            now_ms,
+            can_start,
+        )
     }
+
+    /// Decide one due crawl submission for `host`, as [`Pacer::revalidation`] does, with slots
+    /// `max(revalidation interval, crawl_delay_secs)` apart.
+    pub fn crawl(
+        &mut self,
+        host: &str,
+        crawl_delay_secs: Option<u64>,
+        now_ms: i64,
+        can_start: bool,
+    ) -> Pace {
+        let delay_ms = crawl_delay_secs.map_or(0, |secs| {
+            i64::try_from(secs.saturating_mul(1000)).unwrap_or(i64::MAX)
+        });
+        let interval = self.interval_ms.max(delay_ms);
+        let pass = self.pass;
+        slot(
+            &mut self.crawl_hosts,
+            host,
+            interval,
+            pass,
+            now_ms,
+            can_start,
+        )
+    }
+}
+
+/// The pacing decision for one item to `host`, whose fetches start at most once per
+/// `interval` ms (zero or less: unbudgeted).
+fn slot(
+    hosts: &mut HashMap<String, HostPace>,
+    host: &str,
+    interval: i64,
+    pass: u64,
+    now_ms: i64,
+    can_start: bool,
+) -> Pace {
+    if interval <= 0 {
+        return if can_start { Pace::Start } else { Pace::Hold };
+    }
+    let h = hosts.entry(host.to_owned()).or_default();
+    if can_start && now_ms >= h.next_start {
+        h.next_start = now_ms.saturating_add(interval);
+        return Pace::Start;
+    }
+    let ready = h.next_start.max(now_ms);
+    let held_now = h.held_in == pass;
+    if !held_now && ready.saturating_sub(now_ms) <= HOLD_WINDOW_MS {
+        h.held_in = pass;
+        return Pace::Hold;
+    }
+    // `ready` is taken by the item held this pass, if there is one.
+    let first = if held_now {
+        ready.saturating_add(interval)
+    } else {
+        ready
+    };
+    let next = h.next_free.max(first);
+    h.next_free = next.saturating_add(interval);
+    Pace::Defer { until_ms: next }
 }
 
 /// Unix milliseconds rounded up to Unix seconds, so a deferred item never comes due before its
@@ -141,7 +192,7 @@ pub struct ToStart {
     pub host: Option<String>,
 }
 
-/// A revalidation to move to `not_before` (Unix seconds).
+/// A revalidation or crawl submission to move to `not_before` (Unix seconds).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToDefer {
     pub item: QueuedFetch,
@@ -157,8 +208,11 @@ pub struct Plan {
     pub defer: Vec<ToDefer>,
 }
 
+/// A host's `Crawl-delay` in seconds, when its robots.txt is known and asks for one.
+pub type CrawlDelays<'a> = &'a dyn Fn(&str) -> Option<u64>;
+
 /// What is running now, as the worker sees it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Running<'a> {
     pub uris: &'a HashSet<String>,
     /// Fetches in flight per host key.
@@ -167,12 +221,14 @@ pub struct Running<'a> {
     pub free: usize,
     /// The fetcher's per-host concurrency.
     pub per_host: usize,
+    /// Each host's `Crawl-delay`, for pacing crawl submissions.
+    pub crawl_delays: CrawlDelays<'a>,
 }
 
 /// Go through `candidates` in queue order and decide each:
 ///
 /// - in flight already: skip;
-/// - a revalidation: ask the [`Pacer`] (start, hold or defer);
+/// - a revalidation or a crawl submission: ask the [`Pacer`] (start, hold or defer);
 /// - anything else whose host already has `per_host` fetches in flight (counting those started
 ///   this pass): skip, so it does not hold a worker slot waiting on the fetcher's per-host
 ///   limit;
@@ -206,8 +262,15 @@ pub fn plan(
             .unwrap_or(0)
             .saturating_add(started.get(&host).copied().unwrap_or(0));
         let can_start = busy < running.per_host;
-        if item.reason == FetchReason::Revalidate {
-            match pacer.revalidation(&host, now_ms, can_start) {
+        let pace = match item.reason {
+            FetchReason::Revalidate => Some(pacer.revalidation(&host, now_ms, can_start)),
+            FetchReason::Crawl => {
+                Some(pacer.crawl(&host, (running.crawl_delays)(&host), now_ms, can_start))
+            }
+            FetchReason::Announce | FetchReason::Backfill => None,
+        };
+        if let Some(pace) = pace {
+            match pace {
                 Pace::Start => {}
                 Pace::Hold => continue,
                 Pace::Defer { until_ms } => {
@@ -265,6 +328,7 @@ mod tests {
             hosts,
             free,
             per_host: 2,
+            crawl_delays: &|_| None,
         }
     }
 
@@ -465,6 +529,63 @@ mod tests {
         p.revalidation("late", 150, true);
         p.begin_pass(200);
         assert_eq!(p.len(), 1, "only the host with a slot ahead is kept");
+    }
+
+    #[test]
+    fn crawl_submissions_are_paced_at_the_larger_of_crawl_delay_and_the_interval() {
+        let none = HashSet::new();
+        let no_hosts = HashMap::new();
+        let mut pacer = Pacer::new(Duration::from_millis(1000));
+        pacer.begin_pass(0);
+        let mut candidates: Vec<QueuedFetch> = (0..3)
+            .map(|i| due(&format!("https://l.example/post/{i}"), FetchReason::Crawl))
+            .collect();
+        candidates
+            .extend((0..3).map(|i| due(&format!("https://n.example/{i}"), FetchReason::Crawl)));
+        candidates.push(due("https://l.example/r", FetchReason::Revalidate));
+        let delays = |host: &str| (host == "l.example").then_some(60);
+        let running = Running {
+            crawl_delays: &delays,
+            ..running(&none, &no_hosts, 8)
+        };
+        let plan = plan(candidates, running, &mut pacer, 0);
+        // l.example asks for 60 s; n.example has no Crawl-delay, so the 1 s interval applies.
+        // The revalidation has its own budget.
+        assert_eq!(
+            uris_started(&plan),
+            [
+                "https://l.example/post/0",
+                "https://n.example/0",
+                "https://l.example/r"
+            ]
+        );
+        let deferred: Vec<(&str, i64)> = plan
+            .defer
+            .iter()
+            .map(|d| (d.item.uri.as_str(), d.not_before))
+            .collect();
+        assert_eq!(
+            deferred,
+            [
+                ("https://l.example/post/1", 60),
+                ("https://l.example/post/2", 120),
+                ("https://n.example/2", 2)
+            ]
+        );
+        // With no interval and no Crawl-delay, crawl submissions are not budgeted.
+        let mut p = Pacer::new(Duration::ZERO);
+        p.begin_pass(0);
+        assert_eq!(p.crawl("a", None, 0, true), Pace::Start);
+        assert_eq!(p.crawl("a", None, 0, true), Pace::Start);
+        assert_eq!(p.crawl("a", Some(5), 0, true), Pace::Start);
+        assert_eq!(
+            p.crawl("a", Some(5), 0, true),
+            Pace::Defer { until_ms: 5000 }
+        );
+        assert_eq!(
+            p.crawl("a", Some(u64::MAX), 0, false),
+            Pace::Defer { until_ms: 10_000 }
+        );
     }
 
     #[test]

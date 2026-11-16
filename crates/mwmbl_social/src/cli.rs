@@ -31,6 +31,7 @@ use tracing_subscriber::EnvFilter;
 use url::Url;
 
 use crate::config::{Config, ENV_CONFIG_PATH};
+use crate::crawl_app::CrawlApp;
 use crate::decide::Action;
 use crate::delivery::{self, DeliveryConfig};
 use crate::fasp_app::{FaspApp, MAINTAIN_EVERY};
@@ -411,7 +412,8 @@ async fn serve_with_lock(
         tombstones: handle.tombstones(),
     })
     .merge(fasp.routes())
-    .merge(inbox.routes());
+    .merge(inbox.routes())
+    .merge(crawl_routes(&config, &handle)?);
     if config.metrics {
         app = app.merge(metrics::router(Arc::new(MetricsState {
             store: std::sync::Mutex::new(open_store(&config)?),
@@ -449,6 +451,17 @@ async fn serve_with_lock(
     drop(handle);
     writer.finish();
     Ok(())
+}
+
+/// `POST /api/v1/crawl/submissions`, which answers 404 unless `crawl_tokens` are configured.
+fn crawl_routes(config: &Config, handle: &WriterHandle) -> anyhow::Result<axum::Router> {
+    if !config.crawl_tokens.0.is_empty() {
+        tracing::info!(
+            tokens = config.crawl_tokens.0.len(),
+            "accepting crawl submissions"
+        );
+    }
+    Ok(CrawlApp::new(open_store(config)?, handle.tombstones(), config).routes())
 }
 
 fn follow_settings(config: &Config) -> anyhow::Result<FollowSettings> {

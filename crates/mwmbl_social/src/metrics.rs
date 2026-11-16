@@ -36,6 +36,11 @@ pub struct Snapshot {
     pub fetch_outcomes: Vec<(&'static str, u64)>,
     /// Revalidations moved later to keep within a host's budget.
     pub revalidations_deferred: u64,
+    /// Crawl submissions not fetched, by reason (`not_lemmy`, `robots_disallowed`,
+    /// `robots_unavailable`).
+    pub crawl_skips: Vec<(&'static str, u64)>,
+    /// Crawl submissions moved later to keep within a host's budget or `Crawl-delay`.
+    pub crawl_deferred: u64,
     /// `(index name, pages, page size in bytes)`.
     pub indexes: Vec<(&'static str, usize, usize)>,
 }
@@ -77,6 +82,7 @@ pub fn store_snapshot(store: &Store) -> Result<Snapshot, StoreError> {
         FetchReason::Announce,
         FetchReason::Backfill,
         FetchReason::Revalidate,
+        FetchReason::Crawl,
     ]
     .iter()
     .map(|reason| (reason.as_str().to_string(), 0))
@@ -93,6 +99,8 @@ pub fn store_snapshot(store: &Store) -> Result<Snapshot, StoreError> {
         capabilities_enabled,
         fetch_outcomes: Vec::new(),
         revalidations_deferred: 0,
+        crawl_skips: Vec::new(),
+        crawl_deferred: 0,
         indexes: Vec::new(),
     })
 }
@@ -209,6 +217,27 @@ fn render_process(out: &mut String, snapshot: &Snapshot) {
     series(
         out,
         (
+            "mwmbl_social_crawl_skipped_total",
+            "counter",
+            "Crawl submissions not fetched since the process started, by reason.",
+        ),
+        Some("reason"),
+        snapshot.crawl_skips.iter().copied(),
+    );
+    series(
+        out,
+        (
+            "mwmbl_social_crawl_deferred_total",
+            "counter",
+            "Crawl submissions rescheduled to keep within a host's budget or Crawl-delay since \
+             the process started.",
+        ),
+        None,
+        [("", snapshot.crawl_deferred)],
+    );
+    series(
+        out,
+        (
             "mwmbl_social_index_pages",
             "gauge",
             "Pages in an index file.",
@@ -250,6 +279,8 @@ impl MetricsState {
         };
         snapshot.fetch_outcomes = self.counters.snapshot();
         snapshot.revalidations_deferred = self.counters.revalidations_deferred();
+        snapshot.crawl_skips = self.counters.crawl_skips();
+        snapshot.crawl_deferred = self.counters.crawl_deferred();
         snapshot.indexes = vec![
             (
                 "posts",
@@ -320,6 +351,8 @@ mod tests {
             capabilities_enabled: [("data_sharing".to_string(), 1)].into(),
             fetch_outcomes: vec![("found", 9), ("gone", 0)],
             revalidations_deferred: 7,
+            crawl_skips: vec![("not_lemmy", 2), ("robots_disallowed", 3)],
+            crawl_deferred: 8,
             indexes: vec![("posts", 64, 4096)],
         };
         let text = render(&snapshot);
@@ -338,6 +371,11 @@ mod tests {
             "mwmbl_social_fetch_outcomes_total{outcome=\"gone\"} 0",
             "# TYPE mwmbl_social_revalidations_deferred_total counter",
             "mwmbl_social_revalidations_deferred_total 7",
+            "mwmbl_social_queue_depth{reason=\"backfill\"} 1",
+            "# TYPE mwmbl_social_crawl_skipped_total counter",
+            "mwmbl_social_crawl_skipped_total{reason=\"not_lemmy\"} 2",
+            "mwmbl_social_crawl_skipped_total{reason=\"robots_disallowed\"} 3",
+            "mwmbl_social_crawl_deferred_total 8",
             "mwmbl_social_index_pages{index=\"posts\"} 64",
             "mwmbl_social_index_size_bytes{index=\"posts\"} 262144",
         ] {
@@ -355,6 +393,7 @@ mod tests {
         let empty = store_snapshot(&store)?;
         assert_eq!(empty.queue_total, 0);
         assert_eq!(empty.queue_by_reason.get("revalidate"), Some(&0));
+        assert_eq!(empty.queue_by_reason.get("crawl"), Some(&0));
         assert_eq!(empty.registrations_by_status.get("pending"), Some(&0));
 
         store.enqueue(

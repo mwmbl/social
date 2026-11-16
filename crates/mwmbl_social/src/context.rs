@@ -72,7 +72,7 @@ pub fn after_failure(previous: Option<HostSoftware>, now: i64) -> HostSoftware {
 /// Works out consent contexts for the worker. Holds its own SQLite connection.
 pub struct ContextSource {
     fetcher: Arc<Fetcher>,
-    store: Mutex<Store>,
+    store: Arc<Mutex<Store>>,
     software: Mutex<HashMap<String, HostSoftware>>,
 }
 
@@ -87,9 +87,21 @@ impl ContextSource {
     pub fn new(fetcher: Arc<Fetcher>, store: Store) -> Self {
         Self {
             fetcher,
-            store: Mutex::new(store),
+            store: Arc::new(Mutex::new(store)),
             software: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The SQLite connection, to share with [`crate::crawl::RobotsSource`].
+    #[must_use]
+    pub fn store_handle(&self) -> Arc<Mutex<Store>> {
+        Arc::clone(&self.store)
+    }
+
+    /// Whether the host of `uri` runs Lemmy, by its nodeinfo `software.name` (cached as for
+    /// consent contexts). A failed lookup counts as no.
+    pub async fn host_runs_lemmy(&self, uri: &str, now: i64) -> bool {
+        self.software_of(uri, now).await.as_deref() == Some(LEMMY)
     }
 
     fn store(&self) -> std::sync::MutexGuard<'_, Store> {

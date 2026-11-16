@@ -23,6 +23,7 @@ fasp.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 social_index.workspace = true
 store.workspace = true
 thiserror.workspace = true

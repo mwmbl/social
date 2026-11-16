@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use apub::consent::ConsentContext;
-use apub::fetch::{FetchOutcome, Fetcher, HostSnapshot, SignatureScheme as FetchScheme};
+use apub::fetch::{
+    FetchError, FetchOutcome, Fetcher, HostSnapshot, SignatureScheme as FetchScheme, uri_host_key,
+};
 use serde_json::Value;
 use social_index::{SocialAccount, SocialPost};
 use store::{FetchKind, FetchReason, QueuedFetch, SignatureScheme, Store, StoreError};
@@ -21,10 +23,12 @@ use tokio::task::JoinSet;
 use url::Url;
 
 use crate::context::ContextSource;
+use crate::crawl::{RobotsSource, RobotsVerdict};
 use crate::decide::{
     Action, Author, Carried, Fetched, author_of, decide_account, decide_post, looks_like_post,
 };
 use crate::pacing::{Pacer, Plan, Running, ToDefer, candidate_limit, plan};
+use crate::robots::Robots;
 use crate::writer::{WriterHandle, host_blocked};
 use crate::{now_millis, now_secs};
 
@@ -202,6 +206,22 @@ pub struct FetchCounters {
     error: AtomicU64,
     /// Revalidations moved later to keep within a host's budget. Not fetches.
     revalidations_deferred: AtomicU64,
+    /// Crawl submissions moved later to keep within a host's budget or `Crawl-delay`.
+    crawl_deferred: AtomicU64,
+    /// Crawl submissions dropped because their host does not run Lemmy.
+    crawl_not_lemmy: AtomicU64,
+    /// Crawl submissions (or a redirect or author fetch of one) robots.txt disallowed.
+    crawl_robots_disallowed: AtomicU64,
+    /// Crawl submissions put off because the host's robots.txt was unavailable.
+    crawl_robots_unavailable: AtomicU64,
+}
+
+/// Why a crawl submission was not fetched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrawlSkip {
+    NotLemmy,
+    RobotsDisallowed,
+    RobotsUnavailable,
 }
 
 impl FetchCounters {
@@ -217,8 +237,41 @@ impl FetchCounters {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_deferred(&self) {
-        self.revalidations_deferred.fetch_add(1, Ordering::Relaxed);
+    pub fn record_deferred(&self, reason: FetchReason) {
+        let counter = if reason == FetchReason::Crawl {
+            &self.crawl_deferred
+        } else {
+            &self.revalidations_deferred
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_crawl_skip(&self, skip: CrawlSkip) {
+        let counter = match skip {
+            CrawlSkip::NotLemmy => &self.crawl_not_lemmy,
+            CrawlSkip::RobotsDisallowed => &self.crawl_robots_disallowed,
+            CrawlSkip::RobotsUnavailable => &self.crawl_robots_unavailable,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many crawl submissions were moved later to keep within a host's budget.
+    #[must_use]
+    pub fn crawl_deferred(&self) -> u64 {
+        self.crawl_deferred.load(Ordering::Relaxed)
+    }
+
+    /// `(reason, count)` for crawl submissions not fetched, in a fixed order.
+    #[must_use]
+    pub fn crawl_skips(&self) -> Vec<(&'static str, u64)> {
+        [
+            ("not_lemmy", &self.crawl_not_lemmy),
+            ("robots_disallowed", &self.crawl_robots_disallowed),
+            ("robots_unavailable", &self.crawl_robots_unavailable),
+        ]
+        .into_iter()
+        .map(|(name, counter)| (name, counter.load(Ordering::Relaxed)))
+        .collect()
     }
 
     /// How many revalidations were moved later to keep within a host's budget.
@@ -285,6 +338,7 @@ pub struct Worker {
     fetcher: Arc<Fetcher>,
     writer: WriterHandle,
     contexts: ContextSource,
+    robots: RobotsSource,
     authors: Mutex<AuthorCache>,
     counters: Arc<FetchCounters>,
     config: WorkerConfig,
@@ -369,8 +423,10 @@ impl Worker {
         store: Store,
         config: WorkerConfig,
     ) -> Self {
+        let contexts = ContextSource::new(Arc::clone(&fetcher), store);
         Self {
-            contexts: ContextSource::new(Arc::clone(&fetcher), store),
+            robots: RobotsSource::new(Arc::clone(&fetcher), contexts.store_handle()),
+            contexts,
             fetcher,
             writer,
             authors: Mutex::new(AuthorCache::new(
@@ -395,6 +451,69 @@ impl Worker {
         let (fetched, retry_hint) = to_fetched(outcome, now);
         *hint = (*hint).max(retry_hint);
         fetched
+    }
+
+    /// [`Worker::fetch`] for a crawl submission: every redirect target must be allowed by
+    /// `robots` too. `None` when one was not, and nothing more is to be done with the item.
+    async fn fetch_crawled(
+        &self,
+        uri: &str,
+        robots: &Robots,
+        hint: &mut Option<i64>,
+    ) -> Option<Fetched> {
+        let now = now_secs();
+        let guard = |url: &Url| robots.allows_url(url);
+        let outcome = self.fetcher.fetch_guarded(uri, &guard).await;
+        if let FetchOutcome::Error(FetchError::RedirectDisallowed { location, .. }) = &outcome {
+            tracing::info!(
+                uri,
+                host = uri_host_key(uri),
+                location,
+                "crawl submission dropped: robots.txt disallows its redirect target"
+            );
+            self.counters.record_crawl_skip(CrawlSkip::RobotsDisallowed);
+            return None;
+        }
+        self.counters.record(&outcome);
+        let (fetched, retry_hint) = to_fetched(outcome, now);
+        *hint = (*hint).max(retry_hint);
+        Some(fetched)
+    }
+
+    /// The checks before a crawl submission is fetched, cheapest first: the host runs Lemmy,
+    /// and its robots.txt allows the URI. The rules to fetch it under, or why not.
+    async fn crawl_check(&self, uri: &str, now: i64) -> Result<Arc<Robots>, (CrawlSkip, i64)> {
+        let host = uri_host_key(uri);
+        let skip = |skip: CrawlSkip, retry_at: i64| {
+            self.counters.record_crawl_skip(skip);
+            Err((skip, retry_at))
+        };
+        if !self.contexts.host_runs_lemmy(uri, now).await {
+            tracing::info!(
+                uri,
+                host,
+                "crawl submission dropped: the host does not run Lemmy"
+            );
+            return skip(CrawlSkip::NotLemmy, now);
+        }
+        let Ok(url) = Url::parse(uri) else {
+            return skip(CrawlSkip::RobotsDisallowed, now);
+        };
+        match self.robots.verdict(&url, now).await {
+            RobotsVerdict::Rules(robots) if robots.allows_url(&url) => Ok(robots),
+            RobotsVerdict::Rules(_) => {
+                tracing::info!(
+                    uri,
+                    host,
+                    "crawl submission dropped: robots.txt disallows it"
+                );
+                skip(CrawlSkip::RobotsDisallowed, now)
+            }
+            RobotsVerdict::Unavailable { retry_at } => {
+                tracing::debug!(uri, host, retry_at, "crawl submission waits for robots.txt");
+                skip(CrawlSkip::RobotsUnavailable, retry_at)
+            }
+        }
     }
 
     /// Replaces the cached copy of an actor document with a fresh fetch, or drops it when the
@@ -466,8 +585,23 @@ impl Worker {
                 }],
                 None => Vec::new(),
             }
+        } else if item.reason == FetchReason::Crawl {
+            match self.crawl_check(uri, now).await {
+                Ok(robots) => {
+                    self.decide(item, carried, Some(&robots), now, &mut hint)
+                        .await
+                }
+                Err((CrawlSkip::RobotsUnavailable, retry_at)) => {
+                    hint = Some(retry_at);
+                    vec![Action::Retry {
+                        reason: "robots.txt unavailable".to_owned(),
+                    }]
+                }
+                // Dropped: completing the item is all there is to do.
+                Err(_) => Vec::new(),
+            }
         } else {
-            self.decide(item, carried, now, &mut hint).await
+            self.decide(item, carried, None, now, &mut hint).await
         };
 
         let (retry_reasons, to_apply): (Vec<Action>, Vec<Action>) = actions
@@ -496,10 +630,12 @@ impl Worker {
         }
     }
 
+    /// `robots`: the rules a crawl submission is fetched under; `None` for everything else.
     async fn decide(
         &self,
         item: &QueuedFetch,
         carried: Option<Carried>,
+        robots: Option<&Robots>,
         now: i64,
         hint: &mut Option<i64>,
     ) -> Vec<Action> {
@@ -509,7 +645,13 @@ impl Worker {
             Some(Carried::Account(a)) => (None, Some(a)),
             None => (None, None),
         };
-        let fetched = self.fetch(uri, hint).await;
+        let fetched = match robots {
+            Some(robots) => match self.fetch_crawled(uri, robots, hint).await {
+                Some(fetched) => fetched,
+                None => return Vec::new(),
+            },
+            None => self.fetch(uri, hint).await,
+        };
         let as_post = match item.kind {
             FetchKind::Object => Some(true),
             FetchKind::Actor => Some(false),
@@ -523,7 +665,7 @@ impl Worker {
         };
         match as_post {
             Some(true) => {
-                self.decide_post_path(item, carried_post, &fetched, now, hint)
+                self.decide_post_path(item, carried_post, &fetched, robots, now, hint)
                     .await
             }
             Some(false) => {
@@ -574,12 +716,27 @@ impl Worker {
         item: &QueuedFetch,
         carried: Option<SocialPost>,
         fetched: &Fetched,
+        robots: Option<&Robots>,
         now: i64,
         hint: &mut Option<i64>,
     ) -> Vec<Action> {
         let uri = item.uri.as_str();
         let author = match fetched {
             Fetched::Found(json) => match author_of(json) {
+                // A crawl submission's author is on the same host, under the same robots.txt.
+                Some(author_uri)
+                    if robots.is_some_and(|r| {
+                        Url::parse(&author_uri).is_ok_and(|u| !r.allows_url(&u))
+                    }) =>
+                {
+                    tracing::info!(
+                        uri,
+                        author = author_uri,
+                        "crawl submission dropped: robots.txt disallows its author"
+                    );
+                    self.counters.record_crawl_skip(CrawlSkip::RobotsDisallowed);
+                    return Vec::new();
+                }
                 // Consent needs the author on the object's own origin, so an author anywhere
                 // else is never fetched: that is also what stops an object from pointing us at
                 // arbitrary URLs.
@@ -698,6 +855,7 @@ impl Worker {
                     Ok(items) => {
                         let now_ms = now_millis();
                         pacer.begin_pass(now_ms);
+                        let crawl_delays = |host: &str| self.robots.crawl_delay_secs(host);
                         let Plan { start, defer } = plan(
                             items,
                             Running {
@@ -705,6 +863,7 @@ impl Worker {
                                 hosts: &running.hosts,
                                 free,
                                 per_host,
+                                crawl_delays: &crawl_delays,
                             },
                             &mut pacer,
                             now_ms,
@@ -750,23 +909,25 @@ impl Worker {
         tracing::debug!("fetch worker stopped");
     }
 
-    /// Move a revalidation to its host's next free slot. Not a failure: attempts and the last
-    /// error are left as they are.
+    /// Move a revalidation or crawl submission to its host's next free slot. Not a failure:
+    /// attempts and the last error are left as they are.
     fn defer(&self, store: &Store, deferral: &ToDefer) {
         let uri = deferral.item.uri.as_str();
-        match store.defer(uri, deferral.item.reason, deferral.not_before) {
+        let reason = deferral.item.reason;
+        match store.defer(uri, reason, deferral.not_before) {
             Ok(true) => {
-                self.counters.record_deferred();
+                self.counters.record_deferred(reason);
                 tracing::debug!(
                     uri,
                     host = deferral.host,
+                    reason = reason.as_str(),
                     not_before = deferral.not_before,
-                    "revalidation deferred to keep within the host's budget"
+                    "fetch deferred to keep within the host's budget"
                 );
             }
             // Upgraded or finished since it was read: nothing to move.
             Ok(false) => {}
-            Err(e) => tracing::error!(uri, error = %e, "failed to defer a revalidation"),
+            Err(e) => tracing::error!(uri, error = %e, "failed to defer a fetch"),
         }
     }
 

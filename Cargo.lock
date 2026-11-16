@@ -1082,6 +1082,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "social_index",
  "store",
  "tempfile",
