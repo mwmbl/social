@@ -12,8 +12,12 @@
 //!   429 and 5xx (or a network failure), during which nothing is sent at all.
 //! - Bodies are size-limited, and never logged.
 //!
+//! [`Fetcher::deliver`] sends one activity to an inbox with a signed `POST`, under the same
+//! per-host limits, backoff and scheme cache. It follows no redirects and never reads the body.
+//!
 //! Requests are signed: RFC 9421 first, draft-cavage-12 on 401 or 403, and the scheme that works
-//! is remembered per host. [`Fetcher::host_states`] and [`Fetcher::seed_host`] let the binary
+//! is remembered per host. A `POST` carries `content-digest` (covered by RFC 9421) and `Digest`
+//! (covered by cavage-12). [`Fetcher::host_states`] and [`Fetcher::seed_host`] let the binary
 //! persist that (and the backoff) without this crate knowing about the store.
 
 use std::collections::HashMap;
@@ -26,8 +30,11 @@ use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use url::Url;
 
+use crate::signatures::integrity::legacy_digest;
 use crate::signatures::keys::{RsaSigningKey, SigningKey};
-use crate::signatures::{SignatureError, authority, cavage, http_date, parse_http_date, rfc9421};
+use crate::signatures::{
+    SignatureError, authority, cavage, content_digest, http_date, parse_http_date, rfc9421,
+};
 
 /// Redirects followed per fetch.
 pub const MAX_REDIRECTS: usize = 3;
@@ -56,6 +63,16 @@ impl Kind {
         }
     }
 }
+
+/// The request one hop sends: a `GET` for a document of some kind, or a `POST` of a body.
+#[derive(Debug, Clone, Copy)]
+enum Method<'a> {
+    Get(Kind),
+    Post(&'a [u8]),
+}
+
+/// The content type of a delivered activity.
+const ACTIVITY_JSON: &str = "application/activity+json";
 
 /// Which HTTP signature scheme a host accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +219,34 @@ pub enum FetchOutcome {
         until: i64,
     },
     Error(FetchError),
+}
+
+/// What happened to one delivery ([`Fetcher::deliver`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryOutcome {
+    /// A 2xx answer.
+    Delivered { status: u16 },
+    /// 401 or 403 under both signature schemes.
+    Refused { status: u16 },
+    /// Another 3xx or 4xx answer: the inbox will not take it, and retrying will not help.
+    Rejected { status: u16 },
+    /// 429. The host is now backing off for this long.
+    RateLimited { retry_after_secs: u64 },
+    /// The host is backing off until this Unix time; nothing was sent.
+    Backoff { until: i64 },
+    /// A 5xx answer (the host is now backing off), or the request could not be made.
+    Error(FetchError),
+}
+
+impl DeliveryOutcome {
+    /// Whether trying again later could succeed.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited { .. } | Self::Backoff { .. } | Self::Error(_)
+        )
+    }
 }
 
 /// How long a host stays cached as cavage-only before RFC 9421 is tried on it again.
@@ -468,35 +513,95 @@ impl Fetcher {
         self.get(uri, Kind::Document).await
     }
 
-    async fn get(&self, uri: &str, kind: Kind) -> FetchOutcome {
-        let url = match self.parse_url(uri) {
-            Ok(url) => url,
-            Err(e) => return FetchOutcome::Error(e),
-        };
+    /// The URL and host entry for a request to `uri`, once the host is not backing off and a
+    /// permit is held. `Err` is the outcome to report instead.
+    async fn admit(
+        &self,
+        uri: &str,
+    ) -> Result<
+        (
+            Url,
+            String,
+            Arc<HostEntry>,
+            tokio::sync::OwnedSemaphorePermit,
+        ),
+        FetchOutcome,
+    > {
+        let url = self.parse_url(uri).map_err(FetchOutcome::Error)?;
         let host = host_key(&url);
         let entry = self.entry(&host);
         if let Some(until) = entry.active_backoff(now_secs()) {
             tracing::debug!(host, uri, until, "host is backing off, not sending");
-            return FetchOutcome::Backoff { until };
+            return Err(FetchOutcome::Backoff { until });
         }
-        let Ok(_permit) = Arc::clone(&entry.permits).acquire_owned().await else {
-            return FetchOutcome::Error(FetchError::Internal {
+        let Ok(permit) = Arc::clone(&entry.permits).acquire_owned().await else {
+            return Err(FetchOutcome::Error(FetchError::Internal {
                 uri: uri.to_owned(),
                 reason: "host semaphore closed".to_owned(),
-            });
+            }));
         };
         // The host may have started backing off while we waited for a permit.
         if let Some(until) = entry.active_backoff(now_secs()) {
-            return FetchOutcome::Backoff { until };
+            return Err(FetchOutcome::Backoff { until });
         }
-        self.follow(url, kind, &host, &entry).await
+        Ok((url, host, entry, permit))
+    }
+
+    async fn get(&self, uri: &str, kind: Kind) -> FetchOutcome {
+        match self.admit(uri).await {
+            Ok((url, host, entry, _permit)) => self.follow(url, kind, &host, &entry).await,
+            Err(outcome) => outcome,
+        }
+    }
+
+    /// Delivers `body` (an activity, serialised) to `inbox` with a signed `POST`. See
+    /// [`DeliveryOutcome`]. Redirects are not followed, and the response body is not read.
+    pub async fn deliver(&self, inbox: &str, body: &[u8]) -> DeliveryOutcome {
+        let (url, host, entry, _permit) = match self.admit(inbox).await {
+            Ok(admitted) => admitted,
+            Err(outcome) => return delivery_failure(outcome),
+        };
+        let response = match self
+            .send_signed(&url, Method::Post(body), &host, &entry)
+            .await
+        {
+            Ok(response) => response,
+            Err(outcome) => return delivery_failure(outcome),
+        };
+        let status = response.status();
+        let code = status.as_u16();
+        let now = now_secs();
+        if code == 429 || status.is_server_error() {
+            let retry_after = retry_after(&response, now);
+            let secs = entry.failed(now, retry_after, self.default_backoff);
+            tracing::debug!(host, inbox, status = code, secs, "host is backing off");
+            return if code == 429 {
+                DeliveryOutcome::RateLimited {
+                    retry_after_secs: secs,
+                }
+            } else {
+                DeliveryOutcome::Error(FetchError::Status {
+                    uri: inbox.to_owned(),
+                    status: code,
+                })
+            };
+        }
+        entry.succeeded();
+        if status.is_success() {
+            DeliveryOutcome::Delivered { status: code }
+        } else {
+            DeliveryOutcome::Rejected { status: code }
+        }
     }
 
     async fn follow(&self, start: Url, kind: Kind, host: &str, entry: &HostEntry) -> FetchOutcome {
         let original = start.to_string();
         let mut current = start;
         for _ in 0..=MAX_REDIRECTS {
-            let response = match self.send_signed(&current, kind, host, entry).await {
+            let response = match self
+                .send_signed(&current, Method::Get(kind), host, entry)
+                .await
+            {
                 Ok(response) => response,
                 Err(outcome) => return outcome,
             };
@@ -548,18 +653,18 @@ impl Fetcher {
     async fn send_signed(
         &self,
         url: &Url,
-        kind: Kind,
+        method: Method<'_>,
         host: &str,
         entry: &HostEntry,
     ) -> Result<reqwest::Response, FetchOutcome> {
         let first = entry.first_scheme();
-        let response = self.send_once(url, kind, first, host, entry).await?;
+        let response = self.send_once(url, method, first, host, entry).await?;
         if !auth_failed(response.status()) {
             Self::note_scheme(&response, first, entry);
             return Ok(response);
         }
         let second = first.other();
-        let response = self.send_once(url, kind, second, host, entry).await?;
+        let response = self.send_once(url, method, second, host, entry).await?;
         if auth_failed(response.status()) {
             return Err(FetchOutcome::Refused {
                 status: response.status().as_u16(),
@@ -580,7 +685,7 @@ impl Fetcher {
     async fn send_once(
         &self,
         url: &Url,
-        kind: Kind,
+        method: Method<'_>,
         scheme: SignatureScheme,
         host: &str,
         entry: &HostEntry,
@@ -597,16 +702,29 @@ impl Fetcher {
             ("host".to_owned(), authority(uri).map_err(signing)?),
             ("date".to_owned(), http_date(now)),
         ];
+        let (name, rfc9421_components, cavage_headers) = match method {
+            Method::Get(_) => ("GET", &["@method", "@target-uri"][..], cavage::GET_HEADERS),
+            Method::Post(body) => {
+                headers.push(("content-type".to_owned(), ACTIVITY_JSON.to_owned()));
+                headers.push(("content-digest".to_owned(), content_digest(body)));
+                headers.push(("digest".to_owned(), legacy_digest(body)));
+                (
+                    "POST",
+                    &["@method", "@target-uri", "content-digest"][..],
+                    cavage::POST_HEADERS,
+                )
+            }
+        };
         match scheme {
             SignatureScheme::Rfc9421 => {
                 // Checked end to end: Mastodon 4.7.5 with AUTHORIZED_FETCH accepts a GET
                 // signed over `@method` and `@target-uri` with `created` and `keyid` and no
                 // `alg`, fetching our key from `keyid` (dev/mastodon, 2026-11-15).
                 let (input, signature) = rfc9421::sign_request(
-                    "GET",
+                    name,
                     uri,
                     &headers,
-                    &["@method", "@target-uri"],
+                    rfc9421_components,
                     &self.key_id,
                     now,
                     &self.key,
@@ -623,10 +741,10 @@ impl Fetcher {
                     }));
                 };
                 let signature = cavage::sign_request(
-                    "GET",
+                    name,
                     uri,
                     &headers,
-                    cavage::GET_HEADERS,
+                    cavage_headers,
                     &self.key_id,
                     &cavage::SignOptions::default(),
                     rsa,
@@ -636,10 +754,13 @@ impl Fetcher {
             }
         }
 
-        let mut request = self
-            .client
-            .get(uri)
-            .header(reqwest::header::ACCEPT, kind.accept());
+        let mut request = match method {
+            Method::Get(kind) => self
+                .client
+                .get(uri)
+                .header(reqwest::header::ACCEPT, kind.accept()),
+            Method::Post(body) => self.client.post(uri).body(body.to_vec()),
+        };
         for (name, value) in &headers {
             request = request.header(name.as_str(), value.as_str());
         }
@@ -687,11 +808,7 @@ impl Fetcher {
         let code = status.as_u16();
         let now = now_secs();
         if code == 429 || status.is_server_error() {
-            let retry_after = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| parse_retry_after(v, now));
+            let retry_after = retry_after(&response, now);
             let secs = entry.failed(now, retry_after, self.default_backoff);
             tracing::debug!(host, uri, status = code, secs, "host is backing off");
             return if code == 429 {
@@ -777,6 +894,33 @@ impl Fetcher {
                 }
             }
         }
+    }
+}
+
+/// A response's `Retry-After`, as seconds from `now`.
+fn retry_after(response: &reqwest::Response, now: i64) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| parse_retry_after(v, now))
+}
+
+/// A fetch outcome that ended a delivery before it got a usable answer.
+fn delivery_failure(outcome: FetchOutcome) -> DeliveryOutcome {
+    match outcome {
+        FetchOutcome::Refused { status } => DeliveryOutcome::Refused { status },
+        FetchOutcome::RateLimited { retry_after_secs } => {
+            DeliveryOutcome::RateLimited { retry_after_secs }
+        }
+        FetchOutcome::Backoff { until } => DeliveryOutcome::Backoff { until },
+        FetchOutcome::Error(e) => DeliveryOutcome::Error(e),
+        // Only a finished GET is found or gone; a delivery never gets that far.
+        FetchOutcome::Found { final_uri, .. } => DeliveryOutcome::Error(FetchError::Internal {
+            uri: final_uri,
+            reason: "unexpected fetch outcome for a delivery".to_owned(),
+        }),
+        FetchOutcome::Gone => DeliveryOutcome::Rejected { status: 404 },
     }
 }
 
