@@ -23,8 +23,12 @@ The project is called **Mwmbl Social**. The binary is `mwmbl-social`, and the bi
 - **No end-user search UI.** In FASP the fediverse server is the UI. Mastodon calls us and
   shows the results. We expose a JSON search API and a CLI for testing and debugging.
 - **The spec requires one small admin-facing flow: registration.** The FASP must show the admin
-  a key fingerprint. Self-hosted installs do this with a CLI command. The hosted instance needs a
-  minimal sign-up page, which comes later (see Stage 1).
+  a key fingerprint. Mwmbl Social does this with the `register` CLI command and nothing more.
+  The spec defines the registration protocol but not who a FASP must accept; that is policy.
+  The server admin's approval step already proves their consent, so the only question is whom
+  an instance chooses to serve. Self-hosters run `register` themselves. **Our hosted instance's
+  gate lives in Mwmbl** (its existing domain submission flow), which triggers `register`. No
+  sign-up page or sign-up policy is built here.
 - **Mwmbl integration is postponed** until the index has real content.
 - **Lemmy** comes after FASP.
 
@@ -73,6 +77,8 @@ From `mastodon/fediverse_auxiliary_service_provider_specifications`, checked 202
     quiet-public objects don't qualify.
   - The creator must have opted in via FEP-5feb, and accounts must have `discoverable: true`.
   - For post full-text search we require `indexable: true` as well.
+  - Two exceptions, both in Stage 3: Lemmy authors, and authors who opt in by following our
+    server actor when their software has no `indexable` flag.
   - Servers send remote content too, so we deduplicate by URI.
 - **Revalidation:** deletes arrive as lifecycle events, but we must also recheck every stored
   item at least weekly. A delivered change notification lets us skip the check for that object
@@ -199,9 +205,10 @@ is the point.
 ### Data model (SQLite)
 
 **Principle:** as in Mwmbl, the index is the only record of what is indexed. SQLite holds
-operational state only. It must not mirror the index or grow with it: no per-document or
-per-account rows, and no term lists. Every table below is bounded by the number of registrations
-and hosts, or by a fixed time window.
+operational state and records of explicit user and admin actions. It must not mirror the
+index or grow with it: no rows per indexed document or account, and no term lists. Every table
+below is bounded by the number of registrations and hosts, by a fixed time window, or by
+explicit user and admin actions.
 
 - **`registrations`**: id, the server's **FASP base URL** (`base_url`; this is what the client
   calls, and it is not always the server's own URL, e.g. Mastodon's is `<server>/api/fasp`),
@@ -214,7 +221,9 @@ and hosts, or by a fixed time window.
 - **`fetch_queue`**: uri, kind hint, reason (announce/backfill/revalidate), not_before,
   attempts, last_error. It is bounded: deduplicate by URI and cap its length. When it is full,
   backfill and revalidation work is deferred, and announcements take priority.
-- **`hosts`**: host, signature scheme that works (9421/cavage), backoff_until, blocked flag.
+- **`hosts`**: host, signature scheme that works (9421/cavage), backoff_until, blocked flag,
+  nodeinfo `software.name` (for Lemmy consent and crawl submissions), and a cached robots.txt
+  verdict with its fetch time (Stage 3).
 - **`domain_blocks`**: admin-configured blocked domains. We neither fetch from these hosts nor
   return results from them.
 - **`tombstones`**: object or actor URI, kind (object/author), created_at.
@@ -228,6 +237,9 @@ and hosts, or by a fixed time window.
   - Expect thousands of rows, not millions.
   - Rows are cleared once a full sweep that started after them has finished, so it holds at
     most about one sweep period of entries.
+- **`follow_optins`**: actor URI, followed_at. Authors who opted in by following our server
+  actor (Stage 3). A record of a user action, bounded by those actions like `forgotten` is by
+  admin actions. A row goes when the author unfollows.
 - **`forgotten`**: URIs an admin forgot. Permanent, and bounded by admin actions.
 - **`sweep_state`**: the sweep's current page, and when the current and last sweeps started.
 
@@ -475,8 +487,8 @@ removes it.
      `/api/fasp`. So: use `metadata.faspBaseUrl` if present; otherwise, if nodeinfo's
      `software.name` is `mastodon`, use `<server-url>/api/fasp`; otherwise fail with a clear
      message. `register --fasp-base-url <url>` overrides discovery.
-   - Hosted: a minimal server-rendered sign-up page doing the same. This can come at the end of
-     the stage, after the CLI works.
+   - Hosted: no sign-up page here. Mwmbl's domain submission flow decides who may register
+     and triggers `register` (decided 2026-11-16; see Non-goals).
 4. Capability activation endpoints. Turning `data_sharing` on should:
    - create `content` and `account` lifecycle subscriptions;
    - start backfill for both categories (`maxCount` configurable), following continuations
@@ -561,7 +573,7 @@ activation (2 subscriptions, 2 backfills), backfill indexing alice's public post
 unlisted one nor non-indexable bob's posts. A new post appears; an edit applies after the
 4-minute delay; a delete removes it and leaves a tombstone; alice turning off `indexable`
 removes her posts and keeps her account. Items 6 (tuning revalidation against real servers'
-per-host budgets) and a hosted sign-up page remain.
+per-host budgets) remains. The hosted sign-up page was dropped: Mwmbl handles it.
 
 ### Stage 2: FASP `account_search`
 
@@ -595,20 +607,77 @@ yet is the UI payoff: Mastodon only adds accounts it doesn't already know, and e
 in the e2e index came from that same Mastodon. Showing it needs a second server whose accounts
 reach us (e.g. a second Mastodon in dev/mastodon sharing data with us), or a real deployment.
 
-### Stage 3: Lemmy
+### Stage 3: Lemmy and follow opt-in
 
-Ingest through federation, not the REST API:
+Lemmy doesn't speak FASP, so content arrives two ways, both through the ActivityPub objects
+(never the REST API, which Lemmy's robots.txt disallows under `/api`):
+
+- **Follows (opt-in, fresh):** instance admins opt in, and we follow their communities.
+- **Crawl submissions (coverage):** crawling is **not** done in this repo. Mwmbl's distributed
+  crawler discovers Lemmy objects (walking community outboxes, scheduling, robots.txt and
+  `Crawl-delay`) and submits their **URIs**. We fetch and check each object ourselves.
+
+**Why Lemmy can be crawled at all:** Lemmy is a public forum. lemmy-ui serves the same
+robots.txt on every instance, which disallows only UI and private paths (`/login`, `/settings`,
+`/search`, `/modlog`, `/api`, …) and allows `/post/`, `/comment/` and `/c/`, with
+`Crawl-delay: 60`. There is no `noindex` and no per-user or per-community search opt-out
+(checked in lemmy-ui and lemmy, 2026-11-16). That robots.txt is the admin's indexing consent.
+This does not extend to Mastodon or other microblogging software, whose norms and consent flags
+say no.
+
+**Why URIs, not JSON:** the crawler runs on volunteers' machines, so a submitted object could
+be forged: a faked `to: Public`, a post attributed to someone who never wrote it, or text
+stuffed in to game ranking. Author consent would also need a forgeable actor document. Fetching
+from the origin ourselves means nothing new is trusted.
 
 1. Make the server actor able to follow `Group` actors (communities): accept inbox
    deliveries, verify incoming HTTP signatures, and handle
-   Create/Update/Delete/Announce/Undo.
-2. Admins configure which communities or instances to follow.
-3. Map Lemmy `Page` posts and comments to index documents. The post title becomes the document
+   Create/Update/Delete/Remove/Announce/Undo.
+2. Admins configure which opted-in communities or instances to follow.
+3. Crawl submission endpoint: an authenticated `POST` taking a batch of object URIs, which go
+   on the existing fetch queue (reason `crawl`, lowest priority after backfill). Before
+   fetching, the worker checks:
+   - the host's nodeinfo `software.name` is `lemmy` (otherwise the URI is dropped and logged);
+   - the host's robots.txt (cached in `hosts`, refreshed daily) allows the path for our
+     User-Agent. If it disallows us, drop the URI;
+   - the existing per-host rate limit and backoff, plus the host's `Crawl-delay`.
+   The User-Agent names Mwmbl Social and links to a page about it.
+4. Map Lemmy `Page` posts and comments to index documents. The post title becomes the document
    title, which makes these good Mwmbl candidates.
-4. Consent: Lemmy has no `indexable` flag, so decide on a policy (see open questions).
+5. Consent (decided 2026-11-16), still a pure function with table-driven cases:
+   - The object must be addressed `to:` the public collection, as everywhere. This excludes
+     private and local-only communities.
+   - The rule is chosen by the **author's** host, not the community's. If the author's host
+     runs Lemmy, missing `discoverable`/`indexable` count as yes, but an explicit `false`
+     still means no. Any other author (e.g. a Mastodon user replying in a Lemmy thread) needs
+     the usual FEP-5feb flags.
+6. Moderator removals: a `Remove` (or a community or instance removal seen on revalidation)
+   tombstones like a delete. Crawled content gets no lifecycle events, so the sweep is the only
+   path for its removals.
+7. **Follow opt-in for authors on software without FASP** (decided 2026-11-16). GoToSocial is
+   the motivating case: it doesn't speak FASP, and its default robots.txt and `X-Robots-Tag:
+   noindex` rule out crawling. A server admin can't opt their users in, since consent is per
+   author. So individual users opt in:
+   - A user follows our server actor. We record them in `follow_optins` and follow them back.
+     Their public posts then arrive in our inbox and go on the fetch queue as URIs, fetched from
+     the origin like everything else. On follow, backfill from their outbox if it is served.
+   - The actor's profile says plainly that following it means "index my public posts", and
+     that unfollowing removes them.
+   - Consent: following us counts as opt-in **only for flags the actor doesn't carry**. An
+     explicit `discoverable: false` or `indexable: false` still wins. Mastodon users already
+     have the flags, so a follow changes nothing for them. The consent function stays pure,
+     taking "follows us" as an input.
+   - Unfollow (`Undo` `Follow`): delete the row, add an author tombstone, and unfollow back.
+     Revalidation rechecks the follow like any other consent input.
+   - This works for any software without FEP-5feb, not only GoToSocial. Getting FASP into
+     GoToSocial is still the better long-term route; raise it with its developers once the
+     Mastodon integration can serve as a reference.
 
 **Done when** following a community on a local Lemmy indexes its new posts and comments, and
-removes them on delete.
+removes them on delete and mod removal; and submitting URIs for a fake Lemmy host indexes
+them, except for paths its robots.txt disallows and replies from non-indexable authors; and a
+fake actor without `indexable` that follows us gets its public posts indexed, which are removed
+when it unfollows, while one with `indexable: false` stays out.
 
 ### Stage 4: rest of FASP discovery
 
@@ -654,15 +723,17 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
   - page format and deletion (tinyindex)
   - tokeniser
   - consent evaluation (table-driven over real-world JSON samples from Mastodon, GoToSocial,
-    Misskey and Pleroma)
+    Misskey, Pleroma and Lemmy, with and without a follow opt-in)
   - signature sign/verify against the RFC 9421 test vectors
   - content-digest
 - **Integration tests:** a fake FASP-speaking server in-process (axum) for registration,
   subscriptions and announcements, plus a fake ActivityPub host serving objects, so CI doesn't
   need Mastodon.
 - **End-to-end:** a Docker Compose Mastodon for manual and scheduled checks.
-- **Crawling:** no bulk crawling of real servers in development. Real-server testing only goes
-  through registrations and data_sharing with servers whose admins have opted in.
+- **Crawling:** no bulk crawling of real servers in development or tests. Real-server testing
+  only goes through registrations and data_sharing with servers whose admins have opted in.
+  In production, real-server traffic also includes fetching crawl-submitted Lemmy URIs
+  (Stage 3), which respects robots.txt and per-host limits.
 
 ## Open questions
 
@@ -706,10 +777,9 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
 3. **Data from a deactivated or revoked server:** we don't record which server announced
    what, so purging per server isn't possible. The proposed default is to keep it. It is public
    and opted in, and the sweep keeps rechecking it. An admin can still `forget` a domain.
-4. **Lemmy consent policy:** index all public content from communities on instances that
-   federate with us, or require something further? Also respect `noindex`-style
-   instance-level signals where they exist.
-5. **Hosted sign-up:** who can register with our hosted instance, and do we moderate or limit
-   it?
+4. **Lemmy consent policy:** decided 2026-11-16. Index public Lemmy content where the
+   instance's robots.txt allows it, choosing the consent rule by the author's host. See Stage 3.
+5. **Hosted sign-up:** decided 2026-11-16. Out of scope here. Mwmbl's domain submission flow
+   gates our hosted instance and triggers `register`.
 6. **Index sizing defaults** for small self-hosters versus our instance, and whether to keep
    one posts index or shard it by time.

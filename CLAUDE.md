@@ -28,8 +28,10 @@ next to it.
 These are easy to break by accident. Breaking them is a design bug, not a style issue.
 
 1. **The index is the only record of what is indexed.** SQLite holds bounded operational state
-   only: registrations, subscriptions, the fetch queue, hosts, tombstones and the sweep
-   position. It never gets a row per document or per account, and never stores term lists.
+   (registrations, subscriptions, the fetch queue, hosts, tombstones, the sweep position) and
+   records of explicit user and admin actions (follow opt-ins, forgotten URIs). It never gets
+   a row per document, or per account just because that account was indexed, and never
+   stores term lists.
 2. **Index keys are a pure function of an item's stored fields plus the tokeniser version.**
    Deletion works by reading the stored record and re-tokenising it. Never index a term derived
    from text the item doesn't store. Changing the tokeniser output means bumping its version.
@@ -37,10 +39,19 @@ These are easy to break by accident. Breaking them is a design bug, not a style 
    for the public collection; unlisted and quiet-public objects don't qualify). The author must
    have `discoverable: true`, and posts also need `indexable: true` (FEP-5feb). When in doubt,
    don't index.
+   - Lemmy is the one exception: if the **author's** host runs Lemmy, missing flags count as
+     yes but an explicit `false` still means no. The rule follows the author, not the
+     community (see Stage 3 in `PLAN.md`).
+   - An author who follows our server actor has opted in for any flag their actor doesn't
+     carry. An explicit `false` still wins, and unfollowing withdraws consent.
    - Consent evaluation is a pure function with table-driven tests. A change to it needs a test
      case for the situation it covers.
    - Never store non-public objects anywhere, including logs.
 4. **Only call a server's FASP APIs for capabilities that server has enabled.**
+   Beyond objects announced over FASP (and their revalidation), the only real-server fetches
+   are for followed communities and accounts, and crawl-submitted Lemmy URIs. Those fetches respect robots.txt and per-host limits. Crawling
+   itself (discovery, scheduling) lives in Mwmbl's crawler, not here. Never index JSON a client
+   submits; fetch it from its origin.
 5. **All index writes go through the single writer task.** Nothing else writes to an index file.
 6. **`tinyindex` stays free of fediverse knowledge.** It is meant to be upstreamed to Mwmbl, and
    must keep reading pages written by Mwmbl's Python as `Document`. URI lookup, re-tokenising
@@ -66,8 +77,9 @@ Reference code:
 - **Integration tests** use in-process fakes, an axum FASP server and an ActivityPub host, so
   CI never needs network access or Mastodon.
 - **End-to-end testing** uses the Docker Compose Mastodon dev environment.
-- **Never fetch real fediverse servers in bulk** from tests or during development. Real-server
-  traffic only goes through registrations with servers whose admins have opted in.
+- **Never fetch real fediverse servers in bulk** from tests or during development. In
+  development, real-server traffic only goes through registrations with servers whose admins
+  have opted in.
 
 ## Conventions
 
