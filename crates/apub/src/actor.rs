@@ -1,8 +1,10 @@
 //! The documents we serve: our server actor, `WebFinger` and `NodeInfo`.
 //!
-//! Pure JSON builders. The binary wires them to routes. The actor exists so other servers can
-//! verify the signatures on our fetches (it carries the public key), not to take part in
-//! federation, so it manually approves followers and is neither discoverable nor indexable.
+//! Pure JSON builders. The binary wires them to routes. The actor carries the public key other
+//! servers verify our signed fetches and deliveries with, and it is how authors on software
+//! without FASP opt in: following it means "index my public posts" (PLAN.md Stage 3), which
+//! [`SUMMARY`] says plainly. It accepts every follow, so it does not manually approve
+//! followers, and it is neither discoverable nor indexable itself.
 
 use serde_json::{Value, json};
 use url::Url;
@@ -12,6 +14,12 @@ const NODEINFO_SCHEMA_2_1: &str = "http://nodeinfo.diaspora.software/ns/schema/2
 fn base(base_url: &str) -> &str {
     base_url.trim_end_matches('/')
 }
+
+/// What the actor's profile says about following it.
+pub const SUMMARY: &str = "Mwmbl Social, a fediverse search service. Following this account \
+means: index my public posts. It follows you back to receive them, and indexes only public \
+posts, never when your account says not to (discoverable or indexable off). Unfollow it and \
+your posts are removed from the index.";
 
 /// The URL of our actor, `{base_url}/actor`.
 #[must_use]
@@ -38,11 +46,12 @@ pub fn server_actor(base_url: &str, username: &str, public_key_pem: &str) -> Val
         "type": "Application",
         "preferredUsername": username,
         "name": "Mwmbl Social",
-        "summary": "A fediverse search service. It indexes only public posts and accounts whose owners opted in.",
+        "summary": SUMMARY,
         "url": actor,
         "inbox": format!("{}/inbox", actor),
         "outbox": format!("{}/outbox", actor),
-        "manuallyApprovesFollowers": true,
+        "endpoints": {"sharedInbox": format!("{}/inbox", base(base_url))},
+        "manuallyApprovesFollowers": false,
         "discoverable": false,
         "indexable": false,
         "publicKey": {
@@ -138,7 +147,14 @@ mod tests {
         assert_eq!(a["publicKey"]["id"], server_actor_key_id(BASE));
         assert_eq!(a["publicKey"]["owner"], "https://social.example/actor");
         assert_eq!(a["publicKey"]["publicKeyPem"], "PEM");
-        assert_eq!(a["manuallyApprovesFollowers"], true);
+        assert_eq!(
+            a["endpoints"]["sharedInbox"],
+            "https://social.example/inbox"
+        );
+        assert_eq!(a["manuallyApprovesFollowers"], false);
+        let summary = a["summary"].as_str().unwrap();
+        assert!(summary.contains("index my public posts"));
+        assert!(summary.contains("Unfollow it and your posts are removed"));
         assert_eq!(a["discoverable"], false);
         assert_eq!(a["indexable"], false);
         assert_eq!(
