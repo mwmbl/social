@@ -1,0 +1,18 @@
+{
+  "@context": ["https://join-lemmy.org/context.json", "https://www.w3.org/ns/activitystreams"],
+  "type": "Person",
+  "id": "https://lemmy.example/u/carol",
+  "preferredUsername": "carol",
+  "name": "Carol",
+  "summary": "<p>Rust and gardening.</p>",
+  "source": {"content": "Rust and gardening.", "mediaType": "text/markdown"},
+  "inbox": "https://lemmy.example/u/carol/inbox",
+  "outbox": "https://lemmy.example/u/carol/outbox",
+  "publicKey": {
+    "id": "https://lemmy.example/u/carol#main-key",
+    "owner": "https://lemmy.example/u/carol",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----\n"
+  },
+  "endpoints": {"sharedInbox": "https://lemmy.example/inbox"},
+  "published": "2025-03-01T10:00:00.000000Z"
+}

@@ -1,7 +1,9 @@
 //! Consent evaluation, table-driven over JSON shaped like what Mastodon, GoToSocial, Misskey
-//! and Pleroma serve. Every rule in `apub::consent` has a case here; add one for any change.
+//! Pleroma and Lemmy serve. Every rule in `apub::consent` has a case here; add one for any change.
 
-use apub::consent::{Refusal, evaluate_account, evaluate_post};
+use apub::consent::{
+    ConsentContext, Refusal, evaluate_account, evaluate_account_in, evaluate_post, evaluate_post_in,
+};
 use serde_json::{Value, json};
 
 fn load(name: &str) -> Value {
@@ -361,6 +363,295 @@ fn accounts() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const LEMMY: ConsentContext = ConsentContext {
+    author_on_lemmy: true,
+    follows_us: false,
+};
+const FOLLOWS: ConsentContext = ConsentContext {
+    author_on_lemmy: false,
+    follows_us: true,
+};
+const NONE: ConsentContext = ConsentContext::NONE;
+
+/// Name, object, author, context, expected.
+type ContextCase = (
+    &'static str,
+    Value,
+    Value,
+    ConsentContext,
+    Result<(), Refusal>,
+);
+
+/// Stand-ins for flags the author doesn't carry: a Lemmy host, or following our actor
+/// (PLAN.md Stage 3). An explicit value that isn't `true` always wins.
+#[test]
+fn posts_with_context() {
+    let l_person = load("lemmy_person");
+    let l_page = load("lemmy_page");
+    let l_comment = load("lemmy_comment");
+    let m_actor = load("mastodon_actor");
+    let m_note = load("mastodon_note");
+    let g_actor = load("gotosocial_actor");
+    let g_note = load("gotosocial_note");
+    let p_actor = load("pleroma_actor");
+    let p_note = load("pleroma_note");
+    let g_bare = with(&g_actor, &json!({}), &["discoverable", "indexable"]);
+
+    let cases: Vec<ContextCase> = vec![
+        // Lemmy authors: missing flags count as yes.
+        (
+            "lemmy post",
+            l_page.clone(),
+            l_person.clone(),
+            LEMMY,
+            Ok(()),
+        ),
+        (
+            "lemmy comment",
+            l_comment.clone(),
+            l_person.clone(),
+            LEMMY,
+            Ok(()),
+        ),
+        (
+            "lemmy post judged without knowing the host is lemmy",
+            l_page.clone(),
+            l_person.clone(),
+            NONE,
+            Err(Refusal::NotDiscoverable),
+        ),
+        (
+            "lemmy author with explicit indexable false",
+            l_page.clone(),
+            with(&l_person, &json!({"indexable": false}), &[]),
+            LEMMY,
+            Err(Refusal::NotIndexable),
+        ),
+        (
+            "lemmy author with explicit discoverable false",
+            l_comment.clone(),
+            with(&l_person, &json!({"discoverable": false}), &[]),
+            LEMMY,
+            Err(Refusal::NotDiscoverable),
+        ),
+        (
+            "lemmy author with discoverable null",
+            l_page.clone(),
+            with(&l_person, &json!({"discoverable": null}), &[]),
+            LEMMY,
+            Err(Refusal::NotDiscoverable),
+        ),
+        (
+            "lemmy author with indexable as a string",
+            l_page.clone(),
+            with(&l_person, &json!({"indexable": "true"}), &[]),
+            LEMMY,
+            Err(Refusal::NotIndexable),
+        ),
+        // Lemmy doesn't relax visibility or authorship.
+        (
+            "lemmy post in a private community: not addressed to the public",
+            with(
+                &l_page,
+                &json!({"to": ["https://lemmy.example/c/rust"]}),
+                &[],
+            ),
+            l_person.clone(),
+            LEMMY,
+            Err(Refusal::NotPublic),
+        ),
+        (
+            "lemmy comment with public only in cc",
+            with(
+                &l_comment,
+                &json!({"to": ["https://lemmy.example/c/rust"], "cc": [PUBLIC]}),
+                &[],
+            ),
+            l_person.clone(),
+            LEMMY,
+            Err(Refusal::NotPublic),
+        ),
+        (
+            "lemmy post attributed to someone else",
+            with(
+                &l_page,
+                &json!({"attributedTo": "https://lemmy.example/u/mallory"}),
+                &[],
+            ),
+            l_person.clone(),
+            LEMMY,
+            Err(Refusal::AuthorMismatch),
+        ),
+        (
+            "lemmy author's post hosted elsewhere",
+            with(
+                &l_page,
+                &json!({"id": "https://other.example/post/42"}),
+                &[],
+            ),
+            l_person.clone(),
+            LEMMY,
+            Err(Refusal::OriginMismatch),
+        ),
+        (
+            "removed lemmy post",
+            json!({"id": "https://lemmy.example/post/42", "type": "Tombstone"}),
+            l_person.clone(),
+            LEMMY,
+            Err(Refusal::Gone),
+        ),
+        // The rule follows the author: a Mastodon user commenting in a Lemmy community is
+        // judged with no stand-in (the caller passes the author's host, not the community's).
+        (
+            "mastodon author without indexable, in a lemmy thread",
+            with(
+                &m_note,
+                &json!({"audience": "https://lemmy.example/c/rust", "cc": ["https://lemmy.example/c/rust"]}),
+                &[],
+            ),
+            with(&m_actor, &json!({}), &["indexable"]),
+            NONE,
+            Err(Refusal::NotIndexable),
+        ),
+        // Following our actor stands in for missing flags only.
+        (
+            "follower whose software has no flags",
+            g_note.clone(),
+            g_bare.clone(),
+            FOLLOWS,
+            Ok(()),
+        ),
+        (
+            "same author, not following",
+            g_note.clone(),
+            g_bare.clone(),
+            NONE,
+            Err(Refusal::NotDiscoverable),
+        ),
+        (
+            "pleroma follower (discoverable, no indexable)",
+            p_note.clone(),
+            p_actor.clone(),
+            FOLLOWS,
+            Ok(()),
+        ),
+        (
+            "follower with explicit indexable false",
+            m_note.clone(),
+            with(&m_actor, &json!({"indexable": false}), &[]),
+            FOLLOWS,
+            Err(Refusal::NotIndexable),
+        ),
+        (
+            "follower with explicit discoverable false",
+            m_note.clone(),
+            with(&m_actor, &json!({"discoverable": false}), &[]),
+            FOLLOWS,
+            Err(Refusal::NotDiscoverable),
+        ),
+        (
+            "follower's unlisted post",
+            with(
+                &g_note,
+                &json!({"to": ["https://gts.example/users/bob/followers"], "cc": [PUBLIC]}),
+                &[],
+            ),
+            g_bare.clone(),
+            FOLLOWS,
+            Err(Refusal::NotPublic),
+        ),
+        (
+            "follower's followers-only post",
+            with(
+                &g_note,
+                &json!({"to": ["https://gts.example/users/bob/followers"], "cc": []}),
+                &[],
+            ),
+            g_bare.clone(),
+            FOLLOWS,
+            Err(Refusal::NotPublic),
+        ),
+        (
+            "follower and on lemmy",
+            l_page.clone(),
+            l_person.clone(),
+            ConsentContext {
+                author_on_lemmy: true,
+                follows_us: true,
+            },
+            Ok(()),
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (name, object, author, context, expected) in &cases {
+        let got = evaluate_post_in(object, author, *context);
+        if got != *expected {
+            failures.push(format!("{name}: expected {expected:?}, got {got:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn accounts_with_context() {
+    let l_person = load("lemmy_person");
+    let l_group = load("lemmy_group");
+    let g_bare = with(&load("gotosocial_actor"), &json!({}), &["discoverable"]);
+    let cases: Vec<(&str, Value, ConsentContext, Result<(), Refusal>)> = vec![
+        ("lemmy person", l_person.clone(), LEMMY, Ok(())),
+        ("lemmy community", l_group.clone(), LEMMY, Ok(())),
+        (
+            "lemmy person, host not known to be lemmy",
+            l_person.clone(),
+            NONE,
+            Err(Refusal::NotDiscoverable),
+        ),
+        (
+            "lemmy person with discoverable false",
+            with(&l_person, &json!({"discoverable": false}), &[]),
+            LEMMY,
+            Err(Refusal::NotDiscoverable),
+        ),
+        ("follower without the flag", g_bare.clone(), FOLLOWS, Ok(())),
+        (
+            "not following, without the flag",
+            g_bare.clone(),
+            NONE,
+            Err(Refusal::NotDiscoverable),
+        ),
+        (
+            "follower with discoverable false",
+            with(&g_bare, &json!({"discoverable": false}), &[]),
+            FOLLOWS,
+            Err(Refusal::NotDiscoverable),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, actor, context, expected) in &cases {
+        let got = evaluate_account_in(actor, *context);
+        if got != *expected {
+            failures.push(format!("{name}: expected {expected:?}, got {got:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The plain functions are the same as passing no context.
+#[test]
+fn plain_functions_use_no_context() {
+    let l_person = load("lemmy_person");
+    let l_page = load("lemmy_page");
+    assert_eq!(
+        evaluate_post(&l_page, &l_person),
+        evaluate_post_in(&l_page, &l_person, NONE)
+    );
+    assert_eq!(
+        evaluate_account(&l_person),
+        evaluate_account_in(&l_person, NONE)
+    );
 }
 
 /// Objects captured from the end-to-end Mastodon 4.7.5 in dev/mastodon (`seed.rb`), so the

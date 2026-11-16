@@ -8,6 +8,11 @@
 //!   `indexable: true` (FEP-5feb).
 //! - Accounts: a supported actor type with `discoverable: true`.
 //! - Anything missing, malformed or unexpected is a refusal. When in doubt, don't index.
+//!
+//! Two inputs can stand in for a flag the actor doesn't carry at all ([`ConsentContext`]):
+//! the actor's host runs Lemmy, or the actor follows our server actor (PLAN.md Stage 3). An
+//! explicit value that isn't `true` (`false`, `null`, `"true"`) still means no. Both follow the
+//! *author*: a Mastodon user replying in a Lemmy community needs the usual flags.
 
 use serde_json::Value;
 
@@ -92,9 +97,32 @@ fn origin(uri: &str) -> Option<String> {
     })
 }
 
-/// Only a literal JSON `true` counts. A string "true", a missing field or null do not.
-fn flag(value: &Value, name: &str) -> bool {
-    value.get(name) == Some(&Value::Bool(true))
+/// What we know about an actor beyond its own JSON, which can stand in for a consent flag the
+/// actor doesn't carry. The caller works these out; the evaluation stays pure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConsentContext {
+    /// The actor's host runs Lemmy, by its nodeinfo `software.name`.
+    pub author_on_lemmy: bool,
+    /// The actor follows our server actor, which opts them in to indexing.
+    pub follows_us: bool,
+}
+
+impl ConsentContext {
+    /// Neither stand-in applies: only the actor's own flags count.
+    pub const NONE: Self = Self {
+        author_on_lemmy: false,
+        follows_us: false,
+    };
+}
+
+/// A literal JSON `true` counts. A missing field counts only when `context` supplies a
+/// stand-in. Anything else that is present (`false`, `null`, a string "true") is a no.
+fn flag(value: &Value, name: &str, context: ConsentContext) -> bool {
+    match value.get(name) {
+        Some(Value::Bool(true)) => true,
+        None => context.author_on_lemmy || context.follows_us,
+        Some(_) => false,
+    }
 }
 
 fn is_public(object: &Value) -> bool {
@@ -103,8 +131,13 @@ fn is_public(object: &Value) -> bool {
         .any(|id| PUBLIC.contains(id))
 }
 
-/// May this actor be indexed as an account?
+/// May this actor be indexed as an account? Only its own flags count.
 pub fn evaluate_account(actor: &Value) -> Result<(), Refusal> {
+    evaluate_account_in(actor, ConsentContext::NONE)
+}
+
+/// May this actor be indexed as an account, given what `context` says about it?
+pub fn evaluate_account_in(actor: &Value, context: ConsentContext) -> Result<(), Refusal> {
     if has_type(actor, &["Tombstone"]) {
         return Err(Refusal::Gone);
     }
@@ -114,14 +147,25 @@ pub fn evaluate_account(actor: &Value) -> Result<(), Refusal> {
     if id_of(actor).is_none() {
         return Err(Refusal::MissingId);
     }
-    if !flag(actor, "discoverable") {
+    if !flag(actor, "discoverable", context) {
         return Err(Refusal::NotDiscoverable);
     }
     Ok(())
 }
 
-/// May this object be indexed as a post by `author`, the actor its `attributedTo` names?
+/// May this object be indexed as a post by `author`, the actor its `attributedTo` names? Only
+/// the author's own flags count.
 pub fn evaluate_post(object: &Value, author: &Value) -> Result<(), Refusal> {
+    evaluate_post_in(object, author, ConsentContext::NONE)
+}
+
+/// May this object be indexed as a post by `author`, given what `context` says about the
+/// author?
+pub fn evaluate_post_in(
+    object: &Value,
+    author: &Value,
+    context: ConsentContext,
+) -> Result<(), Refusal> {
     if has_type(object, &["Tombstone"]) {
         return Err(Refusal::Gone);
     }
@@ -138,7 +182,7 @@ pub fn evaluate_post(object: &Value, author: &Value) -> Result<(), Refusal> {
     let [attributed_to] = authors.as_slice() else {
         return Err(Refusal::MissingAuthor);
     };
-    evaluate_account(author)?;
+    evaluate_account_in(author, context)?;
     let Some(author_id) = id_of(author) else {
         return Err(Refusal::MissingId);
     };
@@ -148,7 +192,7 @@ pub fn evaluate_post(object: &Value, author: &Value) -> Result<(), Refusal> {
     if origin(object_id).is_none() || origin(object_id) != origin(author_id) {
         return Err(Refusal::OriginMismatch);
     }
-    if !flag(author, "indexable") {
+    if !flag(author, "indexable", context) {
         return Err(Refusal::NotIndexable);
     }
     Ok(())

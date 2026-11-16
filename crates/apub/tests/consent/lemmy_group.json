@@ -1,0 +1,22 @@
+{
+  "@context": ["https://join-lemmy.org/context.json", "https://www.w3.org/ns/activitystreams"],
+  "type": "Group",
+  "id": "https://lemmy.example/c/rust",
+  "preferredUsername": "rust",
+  "name": "Rust",
+  "summary": "<p>The Rust programming language.</p>",
+  "sensitive": false,
+  "attributedTo": "https://lemmy.example/c/rust/moderators",
+  "postingRestrictedToMods": false,
+  "inbox": "https://lemmy.example/c/rust/inbox",
+  "outbox": "https://lemmy.example/c/rust/outbox",
+  "followers": "https://lemmy.example/c/rust/followers",
+  "publicKey": {
+    "id": "https://lemmy.example/c/rust#main-key",
+    "owner": "https://lemmy.example/c/rust",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----\n"
+  },
+  "endpoints": {"sharedInbox": "https://lemmy.example/inbox"},
+  "language": [{"identifier": "en", "name": "English"}],
+  "published": "2024-06-01T10:00:00.000000Z"
+}

@@ -1,0 +1,16 @@
+{
+  "@context": ["https://join-lemmy.org/context.json", "https://www.w3.org/ns/activitystreams"],
+  "type": "Note",
+  "id": "https://lemmy.example/comment/7",
+  "attributedTo": "https://lemmy.example/u/carol",
+  "to": ["https://www.w3.org/ns/activitystreams#Public"],
+  "cc": ["https://lemmy.example/c/rust", "https://lemmy.example/u/dave"],
+  "content": "<p>Clone it first, optimise later.</p>",
+  "mediaType": "text/html",
+  "source": {"content": "Clone it first, optimise later.", "mediaType": "text/markdown"},
+  "inReplyTo": "https://lemmy.example/post/42",
+  "distinguished": false,
+  "language": {"identifier": "en", "name": "English"},
+  "published": "2026-11-10T13:00:00.000000Z",
+  "audience": "https://lemmy.example/c/rust"
+}

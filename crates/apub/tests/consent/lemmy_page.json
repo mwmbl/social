@@ -1,0 +1,19 @@
+{
+  "@context": ["https://join-lemmy.org/context.json", "https://www.w3.org/ns/activitystreams"],
+  "type": "Page",
+  "id": "https://lemmy.example/post/42",
+  "attributedTo": "https://lemmy.example/u/carol",
+  "to": ["https://lemmy.example/c/rust", "https://www.w3.org/ns/activitystreams#Public"],
+  "cc": [],
+  "name": "Borrow checker tips for beginners",
+  "content": "<p>Some things that helped me.</p>",
+  "mediaType": "text/html",
+  "source": {"content": "Some things that helped me.", "mediaType": "text/markdown"},
+  "attachment": [],
+  "sensitive": false,
+  "commentsEnabled": true,
+  "stickied": false,
+  "language": {"identifier": "en", "name": "English"},
+  "published": "2026-11-10T12:00:00.000000Z",
+  "audience": "https://lemmy.example/c/rust"
+}
