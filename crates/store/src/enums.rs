@@ -104,17 +104,22 @@ string_enum!(
         Announce => "announce",
         Backfill => "backfill",
         Revalidate => "revalidate",
+        /// A URI submitted by Mwmbl's crawler (PLAN.md Stage 3 item 3).
+        Crawl => "crawl",
     }
 );
 
 impl FetchReason {
-    /// Queue priority: lower is more urgent. Announce 0, backfill 1, revalidate 2.
+    /// Queue priority: lower is more urgent. Announce 0, backfill 1, revalidate 2, crawl 3.
+    /// Crawl submissions come last of all: they add coverage, while revalidation keeps what is
+    /// indexed consented.
     #[must_use]
     pub const fn priority(self) -> i64 {
         match self {
             Self::Announce => 0,
             Self::Backfill => 1,
             Self::Revalidate => 2,
+            Self::Crawl => 3,
         }
     }
 }
@@ -167,5 +172,10 @@ mod tests {
         assert_eq!(FetchReason::Announce.priority(), 0);
         assert_eq!(FetchReason::Backfill.priority(), 1);
         assert_eq!(FetchReason::Revalidate.priority(), 2);
+        assert_eq!(FetchReason::Crawl.priority(), 3);
+        assert_eq!(
+            "crawl".parse::<FetchReason>().ok(),
+            Some(FetchReason::Crawl)
+        );
     }
 }

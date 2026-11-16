@@ -8,6 +8,10 @@ use crate::enums::{FetchKind, FetchReason};
 use crate::error::{ctx, to_usize};
 use crate::{Store, StoreError};
 
+/// Crawl submissions are only admitted while the queue holds fewer rows than this percentage
+/// of its cap, so they never take the room announcements and backfills need.
+pub const CRAWL_QUEUE_PERCENT: usize = 50;
+
 /// Something to add to the fetch queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewFetch {
@@ -32,7 +36,8 @@ pub enum EnqueueOutcome {
     AlreadyQueued,
     /// The URI was queued already and was moved to a higher priority.
     Upgraded,
-    /// The queue is full and this backfill or revalidation was not inserted.
+    /// The queue is full (for a crawl submission: at [`CRAWL_QUEUE_PERCENT`] of the cap) and
+    /// this backfill, revalidation or crawl item was not inserted.
     Deferred,
 }
 
@@ -42,7 +47,7 @@ pub struct QueuedFetch {
     pub uri: String,
     pub kind: FetchKind,
     pub reason: FetchReason,
-    /// 0 is most urgent (announce), then backfill 1, revalidate 2.
+    /// 0 is most urgent (announce), then backfill 1, revalidate 2, crawl 3.
     pub priority: i64,
     /// Opaque JSON of the stored index record. Only what the index already holds; never
     /// non-public object content.
@@ -77,6 +82,8 @@ impl Store {
     /// - Queue at or over `cap`: an announce is still admitted, evicting the lowest-priority,
     ///   newest row with priority above 0 (or none, if there is no such row). Backfill and
     ///   revalidate items are [`EnqueueOutcome::Deferred`].
+    /// - A crawl item is [`EnqueueOutcome::Deferred`] once the queue holds
+    ///   [`CRAWL_QUEUE_PERCENT`] of `cap`.
     pub fn enqueue(
         &self,
         item: &NewFetch,
@@ -134,8 +141,11 @@ impl Store {
             let len: i64 = tx
                 .query_row("SELECT COUNT(*) FROM fetch_queue", [], |r| r.get(0))
                 .map_err(ctx(op.clone()))?;
-            let full = to_usize(len, "enqueue")? >= cap;
-            if full && item.reason != FetchReason::Announce {
+            let len = to_usize(len, "enqueue")?;
+            let full = len >= cap;
+            let crawl_full = item.reason == FetchReason::Crawl
+                && len.saturating_mul(100) >= cap.saturating_mul(CRAWL_QUEUE_PERCENT);
+            if (full && item.reason != FetchReason::Announce) || crawl_full {
                 EnqueueOutcome::Deferred
             } else {
                 if full {
@@ -240,7 +250,7 @@ impl Store {
         to_usize(n, "count fetch queue")
     }
 
-    /// Queue length per reason (`announce`, `backfill`, `revalidate`); absent reasons are
+    /// Queue length per reason (`announce`, `backfill`, `revalidate`, `crawl`); absent reasons are
     /// omitted.
     pub fn queue_len_by_reason(&self) -> Result<BTreeMap<String, usize>, StoreError> {
         let op = "count fetch queue by reason";
@@ -408,6 +418,51 @@ mod tests {
         assert_eq!(
             s.enqueue(&item("a", FetchReason::Announce, 0), 4, 2)?,
             EnqueueOutcome::Upgraded
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn crawl_items_only_take_the_first_half_of_the_queue() -> TestResult {
+        let s = Store::open_in_memory()?;
+        let cap = 4;
+        assert_eq!(
+            s.enqueue(&item("c1", FetchReason::Crawl, 0), 1, cap)?,
+            EnqueueOutcome::Added
+        );
+        assert_eq!(
+            s.enqueue(&item("c2", FetchReason::Crawl, 0), 2, cap)?,
+            EnqueueOutcome::Added
+        );
+        // Half full: crawl items wait, backfill still fits.
+        assert_eq!(
+            s.enqueue(&item("c3", FetchReason::Crawl, 0), 3, cap)?,
+            EnqueueOutcome::Deferred
+        );
+        assert_eq!(
+            s.enqueue(&item("b", FetchReason::Backfill, 0), 3, cap)?,
+            EnqueueOutcome::Added
+        );
+        // Already queued is still recognised.
+        assert_eq!(
+            s.enqueue(&item("c1", FetchReason::Crawl, 0), 4, cap)?,
+            EnqueueOutcome::AlreadyQueued
+        );
+        // Crawl items come after revalidation, and an announce evicts them first.
+        s.enqueue(&item("r", FetchReason::Revalidate, 0), 4, cap)?;
+        assert_eq!(uris(&s.next_due(0, 10)?), ["b", "r", "c1", "c2"]);
+        s.enqueue(&item("a", FetchReason::Announce, 0), 5, cap)?;
+        assert_eq!(uris(&s.next_due(0, 10)?), ["a", "b", "r", "c1"]);
+        // An announce of a queued crawl URI upgrades it.
+        assert_eq!(
+            s.enqueue(&item("c1", FetchReason::Announce, 0), 6, cap)?,
+            EnqueueOutcome::Upgraded
+        );
+        // A cap of one still admits one crawl item.
+        let t = Store::open_in_memory()?;
+        assert_eq!(
+            t.enqueue(&item("c", FetchReason::Crawl, 0), 1, 1)?,
+            EnqueueOutcome::Added
         );
         Ok(())
     }

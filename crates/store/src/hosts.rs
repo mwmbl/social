@@ -20,6 +20,20 @@ pub struct Host {
     pub software: Option<String>,
     /// When `software` was last looked up (Unix seconds).
     pub software_checked_at: Option<i64>,
+    /// The robots.txt rules that apply to us, reduced to one group; see [`HostRobots`].
+    pub robots_txt: Option<String>,
+    /// When robots.txt was last fetched (Unix seconds).
+    pub robots_checked_at: Option<i64>,
+}
+
+/// The result of a host's last robots.txt fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostRobots {
+    /// The rules that apply to us as a reduced robots.txt; empty allows everything. `None`:
+    /// robots.txt was unavailable, which disallows everything until it is fetched again.
+    pub robots_txt: Option<String>,
+    /// When it was fetched (Unix seconds).
+    pub checked_at: i64,
 }
 
 /// The result of a host's last software lookup.
@@ -31,8 +45,8 @@ pub struct HostSoftware {
     pub checked_at: i64,
 }
 
-const HOST_COLUMNS: &str =
-    "host, signature_scheme, backoff_until, blocked, software, software_checked_at";
+const HOST_COLUMNS: &str = "host, signature_scheme, backoff_until, blocked, software, \
+     software_checked_at, robots_txt, robots_checked_at";
 
 fn host_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Host> {
     Ok(Host {
@@ -42,6 +56,8 @@ fn host_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Host> {
         blocked: r.get(3)?,
         software: r.get(4)?,
         software_checked_at: r.get(5)?,
+        robots_txt: r.get(6)?,
+        robots_checked_at: r.get(7)?,
     })
 }
 
@@ -130,6 +146,43 @@ impl Store {
                 params![host, software, checked_at],
             )
             .map_err(ctx(format!("set software of host {host}")))?;
+        Ok(())
+    }
+
+    /// The host's last robots.txt fetch, if one was recorded.
+    pub fn host_robots(&self, host: &str) -> Result<Option<HostRobots>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT robots_txt, robots_checked_at FROM hosts
+                 WHERE host = ?1 AND robots_checked_at IS NOT NULL",
+                [host],
+                |r| {
+                    Ok(HostRobots {
+                        robots_txt: r.get(0)?,
+                        checked_at: r.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(ctx(format!("read robots.txt of host {host}")))
+    }
+
+    /// Records a robots.txt fetch: the reduced rules (empty: allow everything), or `None` when
+    /// robots.txt was unavailable, and when it was fetched.
+    pub fn set_host_robots(
+        &self,
+        host: &str,
+        robots_txt: Option<&str>,
+        checked_at: i64,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT INTO hosts (host, robots_txt, robots_checked_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (host) DO UPDATE SET robots_txt = excluded.robots_txt,
+                     robots_checked_at = excluded.robots_checked_at",
+                params![host, robots_txt, checked_at],
+            )
+            .map_err(ctx(format!("set robots.txt of host {host}")))?;
         Ok(())
     }
 
@@ -272,6 +325,35 @@ mod tests {
         // A new host.
         s.set_host_software("g.example", Some("gotosocial"), 5)?;
         assert!(s.host("g.example")?.is_some_and(|h| !h.blocked));
+        Ok(())
+    }
+
+    #[test]
+    fn host_robots() -> TestResult {
+        let s = Store::open_in_memory()?;
+        assert_eq!(s.host_robots("l.example")?, None);
+        s.set_host_software("l.example", Some("lemmy"), 5)?;
+        assert_eq!(s.host_robots("l.example")?, None);
+        s.set_host_robots("l.example", Some("User-agent: *\nDisallow: /a\n"), 100)?;
+        assert_eq!(
+            s.host_robots("l.example")?,
+            Some(HostRobots {
+                robots_txt: Some("User-agent: *\nDisallow: /a\n".into()),
+                checked_at: 100
+            })
+        );
+        let h = s.host("l.example")?.ok_or("missing")?;
+        assert_eq!(h.software.as_deref(), Some("lemmy"));
+        assert_eq!(h.robots_checked_at, Some(100));
+        // Unavailable.
+        s.set_host_robots("l.example", None, 200)?;
+        assert_eq!(
+            s.host_robots("l.example")?,
+            Some(HostRobots {
+                robots_txt: None,
+                checked_at: 200
+            })
+        );
         Ok(())
     }
 

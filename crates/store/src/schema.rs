@@ -134,4 +134,34 @@ CREATE TABLE following (
     created_at INTEGER NOT NULL
 );
 ",
+    "
+-- Crawl submissions (PLAN.md Stage 3 item 3): a fourth fetch reason, `crawl`, at priority 3,
+-- the lowest, after revalidation. SQLite cannot change a CHECK constraint in place, so the
+-- table is rebuilt with its rows and its index.
+CREATE TABLE fetch_queue_new (
+    uri         TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL CHECK (kind IN ('object','actor','unknown')),
+    reason      TEXT NOT NULL CHECK (reason IN ('announce','backfill','revalidate','crawl')),
+    priority    INTEGER NOT NULL CHECK (priority BETWEEN 0 AND 3),
+    record      TEXT,
+    not_before  INTEGER NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT,
+    enqueued_at INTEGER NOT NULL
+);
+INSERT INTO fetch_queue_new
+    (uri, kind, reason, priority, record, not_before, attempts, last_error, enqueued_at)
+SELECT uri, kind, reason, priority, record, not_before, attempts, last_error, enqueued_at
+FROM fetch_queue ORDER BY rowid;
+DROP TABLE fetch_queue;
+ALTER TABLE fetch_queue_new RENAME TO fetch_queue;
+CREATE INDEX fetch_queue_due ON fetch_queue(priority, not_before, enqueued_at);
+
+-- The robots.txt rules that apply to us on a host, for crawl submissions, as a reduced
+-- robots.txt (one `User-agent: *` group), and when it was fetched. An empty text allows
+-- everything; NULL with a check time means robots.txt was unavailable (disallow all until
+-- it is fetched again). Bounded by hosts.
+ALTER TABLE hosts ADD COLUMN robots_txt TEXT;
+ALTER TABLE hosts ADD COLUMN robots_checked_at INTEGER;
+",
 ];

@@ -46,8 +46,8 @@ pub use enums::{
 pub use error::StoreError;
 pub use follow_optins::FollowOptin;
 pub use following::Following;
-pub use hosts::{DomainBlock, Host, HostSoftware};
-pub use queue::{EnqueueOutcome, NewFetch, QueuedFetch};
+pub use hosts::{DomainBlock, Host, HostRobots, HostSoftware};
+pub use queue::{CRAWL_QUEUE_PERCENT, EnqueueOutcome, NewFetch, QueuedFetch};
 pub use registrations::{NewRegistration, Registration};
 pub use subscriptions::{Backfill, Subscription};
 pub use sweep::SweepState;
@@ -184,6 +184,57 @@ mod tests {
         assert_eq!(host.software, None);
         assert_eq!(store.host_software("a.example")?, None);
         assert_eq!(store.follow_optins()?, []);
+        Ok(())
+    }
+
+    #[test]
+    fn crawl_migration_rebuilds_the_queue_with_its_rows() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("s.db");
+        {
+            // A database from before the crawl reason (migration 6).
+            let conn = Connection::open(&path)?;
+            for sql in schema::MIGRATIONS.iter().take(5) {
+                conn.execute_batch(sql)?;
+            }
+            conn.execute_batch("PRAGMA user_version = 5")?;
+            conn.execute(
+                "INSERT INTO fetch_queue (uri, kind, reason, priority, not_before, attempts,
+                     last_error, enqueued_at)
+                 VALUES ('https://a.example/1', 'object', 'backfill', 1, 9, 2, 'timeout', 3)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO hosts (host, software, software_checked_at)
+                 VALUES ('a.example', 'lemmy', 4)",
+                [],
+            )?;
+        }
+        let store = Store::open(&path)?;
+        let rows = store.next_due(9, 10)?;
+        let row = rows.first().ok_or("missing row")?;
+        assert_eq!(
+            (row.uri.as_str(), row.reason, row.attempts, row.not_before),
+            ("https://a.example/1", FetchReason::Backfill, 2, 9)
+        );
+        assert_eq!(row.last_error.as_deref(), Some("timeout"));
+        let crawl = NewFetch {
+            uri: "https://a.example/2".into(),
+            kind: FetchKind::Unknown,
+            reason: FetchReason::Crawl,
+            record: None,
+            not_before: 0,
+        };
+        assert_eq!(store.enqueue(&crawl, 5, 10)?, EnqueueOutcome::Added);
+        let indexes: i64 = store.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'fetch_queue_due'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(indexes, 1);
+        let host = store.host("a.example")?.ok_or("missing host")?;
+        assert_eq!(host.software.as_deref(), Some("lemmy"));
+        assert_eq!(store.host_robots("a.example")?, None);
         Ok(())
     }
 
