@@ -145,8 +145,9 @@ crates/
                 server actor + WebFinger + NodeInfo (`apub::actor`), signed GET client with per-host
                 state (`apub::fetch`: same-host redirects only, id/origin check, backoff; the
                 binary persists `Fetcher::host_states` into `hosts`), object parsing
-                (`apub::objects`: Note/Page/Article/Person/Group…),
-                consent evaluation
+                (`apub::objects`: Note/Page/Article/Person/Group…), a host's nodeinfo
+                `software.name` (`apub::nodeinfo`, through `Fetcher::fetch_document`: same
+                limits, no id/origin check), consent evaluation
                 (`apub::signatures`: framework-agnostic, operating on a method, a target URI,
                 a header lookup and a status. Fixed component set; RFC 9421 signs ed25519 and
                 rsa-v1_5-sha256 and also verifies rsa-pss-sha512; cavage-12 is RSA-SHA256 only,
@@ -222,8 +223,8 @@ explicit user and admin actions.
   attempts, last_error. It is bounded: deduplicate by URI and cap its length. When it is full,
   backfill and revalidation work is deferred, and announcements take priority.
 - **`hosts`**: host, signature scheme that works (9421/cavage), backoff_until, blocked flag,
-  nodeinfo `software.name` (for Lemmy consent and crawl submissions), and a cached robots.txt
-  verdict with its fetch time (Stage 3).
+  nodeinfo `software.name` with its check time (for Lemmy consent and crawl submissions), and a
+  cached robots.txt verdict with its fetch time (Stage 3).
 - **`domain_blocks`**: admin-configured blocked domains. We neither fetch from these hosts nor
   return results from them.
 - **`tombstones`**: object or actor URI, kind (object/author), created_at.
@@ -702,6 +703,25 @@ removes them on delete and mod removal; and submitting URIs for a fake Lemmy hos
 them, except for paths its robots.txt disallows and replies from non-indexable authors; and a
 fake actor without `indexable` that follows us gets its public posts indexed, which are removed
 when it unfollows, while one with `indexable: false` stays out.
+
+**Status (2026-11-16): the consent rules of items 5 and 7 are live in the pipeline.** Following
+(inbox, `Follow`/`Undo`, follow-back), crawl submissions and robots.txt are not built yet.
+- `decide_post`/`decide_account` take the author's `ConsentContext` and use the `_in`
+  evaluations. The author tombstone follows `consent::posts_consented` (the effective
+  `indexable`), not the parsed flag, so a flagless Lemmy author or follower isn't hidden.
+- The worker (`mwmbl_social::context`) works out the context on every fetch of an actor (a
+  post's author, or the actor itself), never cached with the author document, so revalidation
+  sees an unfollow or a software change. `follows_us` reads `follow_optins` (migration 4).
+  `author_on_lemmy` is the nodeinfo `software.name` of the **actor's** host (the `hosts`
+  `software` column in the Data model). Both are looked up **only when the actor lacks
+  `discoverable` or `indexable`**, so Mastodon authors cost no extra fetch or query.
+- Software cache: in memory in front of `hosts.software`/`software_checked_at`. A name is
+  trusted for 1 day; a failed lookup is recorded as `software = NULL` and retried after 1 hour,
+  counting as not Lemmy meanwhile. The lookup takes the highest nodeinfo 2.x link (shared with
+  FASP registration discovery), which must be on the host's own origin.
+- Lemmy objects: `language` `{"identifier": …}` is mapped when there is no `contentMap` (`und`
+  is none); `Page.name` is the title; comments are `Note`s with `inReplyTo`; a community `Group`
+  parses as an account. `stats` reports the number of follow opt-ins.
 
 ### Stage 4: rest of FASP discovery
 
