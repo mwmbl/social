@@ -86,6 +86,7 @@ set from the environment as `MWMBL_SOCIAL_<FIELD>`, for example `MWMBL_SOCIAL_BA
 | `metrics` | `false` | Serve Prometheus text at `/metrics`. It is public, so firewall or proxy it |
 | `follow` | `[]` | Communities or accounts to follow, e.g. `["!rust@lemmy.example"]`; env: comma-separated |
 | `outbox_backfill_pages` | 5 | Outbox pages read when a follow is accepted; 0 turns it off |
+| `crawl_tokens` | `[]` | Bearer tokens for crawl submissions (at least 16 characters each); none turns the endpoint off. Env: comma-separated |
 
 ## Following communities
 
@@ -101,6 +102,24 @@ whose instance admins agreed to be indexed.
   6 hours. Removing one from the list does not unfollow it.
 
 The server must be running to receive the community's acceptance.
+
+## Crawl submissions
+
+Mwmbl's crawler finds Lemmy posts and comments and sends us their URIs, never their JSON:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"uris": ["https://lemmy.example/post/1"]}' https://social.example/api/v1/crawl/submissions
+# 202 {"accepted": 1, "deferred": 0, "rejected": 0}
+```
+
+- At most 1000 URIs, `https` only. Duplicates count once. URIs on blocked domains or forgotten
+  are rejected. Crawl URIs only use the fetch queue while it is under half full; the rest are
+  deferred (counted, not queued), so resubmit them later.
+- 404 when no `crawl_tokens` are set, 401 on a bad token, 422 for any other body.
+- Before fetching, we check the host's nodeinfo says Lemmy (anything else is dropped) and that
+  its robots.txt allows the URI for `mwmbl-social`. Fetches to a host are spaced by its
+  `Crawl-delay` (at most 300 s). Authors still need consent; see PLAN.md Stage 3.
 
 ## Removing content
 

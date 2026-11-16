@@ -223,7 +223,7 @@ explicit user and admin actions.
 - **`capabilities`**: registration_id, capability id, version, enabled, updated_at.
 - **`subscriptions`**: registration_id, remote subscription id, category, type, created_at.
 - **`backfills`**: registration_id, remote id, category, state, more_available.
-- **`fetch_queue`**: uri, kind hint, reason (announce/backfill/revalidate), not_before,
+- **`fetch_queue`**: uri, kind hint, reason (announce/backfill/revalidate/crawl), not_before,
   attempts, last_error. It is bounded: deduplicate by URI and cap its length. When it is full,
   backfill and revalidation work is deferred, and announcements take priority.
 - **`hosts`**: host, signature scheme that works (9421/cavage), backoff_until, blocked flag,
@@ -668,8 +668,8 @@ from the origin ourselves means nothing new is trusted.
    Create/Update/Delete/Remove/Announce/Undo.
 2. Admins choose which opted-in communities (or accounts) to follow: the `follow` command or
    the `follow` config option (built, see below).
-3. Crawl submission endpoint: an authenticated `POST` taking a batch of object URIs, which go
-   on the existing fetch queue (reason `crawl`, lowest priority after backfill). Before
+3. Crawl submission endpoint (built, see below): an authenticated `POST` taking a batch of
+   object URIs, which go on the existing fetch queue (reason `crawl`, lowest priority). Before
    fetching, the worker checks:
    - the host's nodeinfo `software.name` is `lemmy` (otherwise the URI is dropped and logged);
    - the host's robots.txt (cached in `hosts`, refreshed daily) allows the path for our
@@ -714,8 +714,8 @@ fake actor without `indexable` that follows us gets its public posts indexed, wh
 when it unfollows, while one with `indexable: false` stays out.
 
 **Status (2026-11-16): the consent rules of items 5 and 7 are live in the pipeline.** The inbox,
-follow opt-in, admin follows and outbox backfill are built (below). Crawl submissions and
-robots.txt are not built yet.
+follow opt-in, admin follows, outbox backfill and crawl submissions with robots.txt are built
+(below).
 - `decide_post`/`decide_account` take the author's `ConsentContext` and use the `_in`
   evaluations. The author tombstone follows `consent::posts_consented` (the effective
   `indexable`), not the parsed flag, so a flagless Lemmy author or follower isn't hidden.
@@ -817,6 +817,51 @@ when the queue defers one (full). An outbox that is not served (401/403/404) or 
 fails is logged and ends the backfill. Only ids are taken; the outbox JSON is never stored or
 indexed. Not resumed after a restart.
 
+**Crawl submissions (item 3), `mwmbl_social::crawl_app` and `mwmbl_social::crawl`:**
+- `POST /api/v1/crawl/submissions`, body exactly `{"uris": [...]}` (unknown fields, object JSON,
+  or more than 1000 URIs: 422; over 1 MiB: 413). `Authorization: Bearer` with one of
+  `crawl_tokens` (env `MWMBL_SOCIAL_CRAWL_TOKENS`, comma-separated; each at least 16
+  characters, no whitespace; redacted in `Debug`). No tokens: 404. A bad token: 401. Tokens are
+  compared by SHA-256 digest in constant time.
+- 202 with `{accepted, deferred, rejected}`. Duplicates count once. Rejected: not `https`
+  (`http` with `allow_http`), not an absolute URL with a host, user info, longer than 2048, a
+  blocked domain, or forgotten. Queued as kind `unknown`, reason `crawl` (priority 3, after
+  revalidate). Crawl items are admitted only while the queue is under 50% of `queue_cap`;
+  beyond that they are deferred (counted, not queued), and an announce evicts them first. An
+  already-queued URI counts as accepted and keeps its reason (a revalidation is not turned
+  into a crawl).
+- **robots.txt governs crawl-submitted fetches only.** Fetches for FASP announcements and
+  backfill, follows, the inbox and revalidation (of crawled content too) are federation, not
+  crawling, and are not checked. Nodeinfo and robots.txt fetches are not checked either.
+- Worker checks before fetching a crawl item, cheapest first: the host's nodeinfo `software` is
+  `lemmy` (the consent software cache; a failed lookup is not Lemmy), else the item is
+  completed and logged at info with URI and host; then robots.txt allows the URI's path and
+  query, else dropped likewise. robots.txt being unavailable reschedules the item for its
+  retry time instead (an hour), counting an attempt.
+- robots.txt (`mwmbl_social::robots`, RFC 9309, as Mwmbl's crawler): fetched with
+  `Fetcher::fetch_text` (per-host limits and backoff, same-host redirects, first 512 KiB, lossy
+  UTF-8), one fetch per host at a time. 2xx: the rules; 4xx except 429: allow all; 429, 5xx,
+  backoff or any failure: disallow all, retried after 1 h. Rules are trusted for a day. Groups
+  match our product token (`fetch::user_agent` up to the first `/`, `mwmbl-social`),
+  case-insensitively and on the token only; every group naming us is merged, else every `*`
+  group, else no rules. Longest pattern wins, `Allow` wins ties, `*` and a final `$` are
+  understood, paths compare percent-encoded. `Crawl-delay` rounds up, the largest of the merged
+  groups', capped at 300 s. Only the rules for us are cached, written back as one `User-agent:
+  *` group in `hosts.robots_txt` (`NULL` with a check time: unavailable), in memory in front.
+- Each same-host redirect target is checked against the same rules before it is requested
+  (`Fetcher::fetch_guarded`), and so is the author's URI before the author fetch; either one
+  disallowed drops the item.
+- Pacing: crawl items to one host start at most once per `max(Crawl-delay,
+  revalidate_interval_per_host_ms)`, budgeted apart from revalidations, by the same pacer
+  (held or deferred to a slot). A host's `Crawl-delay` is known once its robots.txt is in
+  memory; until then the revalidation interval applies.
+- Decide: a crawl item is decided exactly as a backfill (table test), with the author judged
+  by its own host's consent rule. An author off the object's origin is not fetched, so such a
+  reply is not indexed.
+- `/metrics`: `mwmbl_social_queue_depth{reason="crawl"}`,
+  `mwmbl_social_crawl_skipped_total{reason="not_lemmy"|"robots_disallowed"|"robots_unavailable"}`
+  and `mwmbl_social_crawl_deferred_total`.
+
 ### Stage 4: rest of FASP discovery
 
 1. `trends` (content). We can use the `trends` subscription type of data_sharing as input.
@@ -871,7 +916,8 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
 - **Crawling:** no bulk crawling of real servers in development or tests. Real-server testing
   only goes through registrations and data_sharing with servers whose admins have opted in.
   In production, real-server traffic also includes fetching crawl-submitted Lemmy URIs
-  (Stage 3), which respects robots.txt and per-host limits.
+  (Stage 3), which respects robots.txt and per-host limits. robots.txt governs those crawl
+  fetches only; federation fetches (FASP, follows, revalidation) are not crawling.
 
 ## Open questions
 
