@@ -20,6 +20,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use url::Url;
 
+use crate::context::ContextSource;
 use crate::decide::{
     Action, Author, Carried, Fetched, author_of, decide_account, decide_post, looks_like_post,
 };
@@ -283,6 +284,7 @@ pub enum Finished {
 pub struct Worker {
     fetcher: Arc<Fetcher>,
     writer: WriterHandle,
+    contexts: ContextSource,
     authors: Mutex<AuthorCache>,
     counters: Arc<FetchCounters>,
     config: WorkerConfig,
@@ -359,9 +361,16 @@ fn same_origin(a: &str, b: &str) -> bool {
 }
 
 impl Worker {
+    /// `store` is the worker's own connection, for follow opt-ins and host software.
     #[must_use]
-    pub fn new(fetcher: Arc<Fetcher>, writer: WriterHandle, config: WorkerConfig) -> Self {
+    pub fn new(
+        fetcher: Arc<Fetcher>,
+        writer: WriterHandle,
+        store: Store,
+        config: WorkerConfig,
+    ) -> Self {
         Self {
+            contexts: ContextSource::new(Arc::clone(&fetcher), store),
             fetcher,
             writer,
             authors: Mutex::new(AuthorCache::new(
@@ -417,6 +426,16 @@ impl Worker {
                 .insert(author_uri, json.clone(), now);
         }
         fetched
+    }
+
+    /// The consent context of the actor at `uri`, when its document was fetched. It is worked
+    /// out on every fetch, never cached with the document, so revalidation sees an unfollow
+    /// or a host's software change.
+    async fn context_of(&self, uri: &str, fetched: &Fetched, now: i64) -> ConsentContext {
+        match fetched {
+            Fetched::Found(json) => self.contexts.context_for(uri, json, now).await,
+            _ => ConsentContext::NONE,
+        }
     }
 
     /// Fetch, decide and apply one queue item. This is the pipeline: the queue worker and
@@ -511,13 +530,14 @@ impl Worker {
                 // A freshly fetched actor document is newer than any cached copy: an opt-out
                 // announced for this account must reach posts processed after it.
                 self.refresh_author(uri, &fetched, now);
+                let context = self.context_of(uri, &fetched, now).await;
                 decide_account(
                     uri,
                     item.reason,
                     item.attempts,
                     carried_account,
                     &fetched,
-                    ConsentContext::NONE,
+                    context,
                     now,
                 )
             }
@@ -564,7 +584,9 @@ impl Worker {
                 // else is never fetched: that is also what stops an object from pointing us at
                 // arbitrary URLs.
                 Some(author_uri) if same_origin(&author_uri, uri) => {
-                    Some(self.fetch_author(&author_uri, hint).await)
+                    let author = self.fetch_author(&author_uri, hint).await;
+                    let context = self.context_of(&author_uri, &author, now).await;
+                    Some((author, context))
                 }
                 _ => None,
             },
@@ -576,9 +598,9 @@ impl Worker {
             item.attempts,
             carried,
             fetched,
-            author.as_ref().map(|fetched| Author {
+            author.as_ref().map(|(fetched, context)| Author {
                 fetched,
-                context: ConsentContext::NONE,
+                context: *context,
             }),
             now,
         )

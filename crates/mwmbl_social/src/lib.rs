@@ -17,6 +17,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod context;
 pub mod decide;
 pub mod fasp_app;
 pub mod http;

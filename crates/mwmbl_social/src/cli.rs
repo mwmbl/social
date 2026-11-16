@@ -250,6 +250,7 @@ fn spawn_background(
     let worker = Arc::new(Worker::new(
         Arc::clone(fetcher),
         handle.clone(),
+        open_store(config)?,
         worker_config(config),
     ));
     let counters = worker.counters();
@@ -503,7 +504,12 @@ async fn ingest(config: &Config, uri: &str, kind: Option<FetchKind>) -> anyhow::
     let store = open_store(config)?;
     seed_hosts(&fetcher, &store, now_secs())?;
     let result = {
-        let worker = Worker::new(Arc::clone(&fetcher), writer.handle(), worker_config(config));
+        let worker = Worker::new(
+            Arc::clone(&fetcher),
+            writer.handle(),
+            open_store(config)?,
+            worker_config(config),
+        );
         let now = now_secs();
         let processed = worker.process(&adhoc_item(uri, kind, now), now).await;
         let mut report = json!({
@@ -844,6 +850,7 @@ fn stats(config: &Config) -> anyhow::Result<Value> {
             "author": count(TombstoneKind::Author),
         },
         "domain_blocks": store.list_domain_blocks()?.len(),
+        "follow_optins": store.follow_optins()?.len(),
         "registrations": {
             "total": registrations_total,
             "by_status": registrations_by_status,

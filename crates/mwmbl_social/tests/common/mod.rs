@@ -255,6 +255,7 @@ impl TestEnv {
         let worker = Arc::new(Worker::new(
             Arc::new(Fetcher::new(fetcher).unwrap()),
             handle.clone(),
+            Store::open(&config.store_path()).unwrap(),
             worker_config,
         ));
         let store = Store::open(&config.store_path()).unwrap();
