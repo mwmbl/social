@@ -55,6 +55,86 @@ fn pleroma_note_with_fractional_seconds() {
 }
 
 #[test]
+fn lemmy_page() {
+    let p = parse_post(&load("lemmy_page")).unwrap();
+    assert_eq!(p.uri, "https://lemmy.example/post/42");
+    assert_eq!(p.author_uri, "https://lemmy.example/u/carol");
+    assert_eq!(p.name.as_deref(), Some("Borrow checker tips for beginners"));
+    assert_eq!(p.content_text, "Some things that helped me.");
+    assert_eq!(
+        p.language.as_deref(),
+        Some("en"),
+        "from Lemmy's language object"
+    );
+    assert_eq!(p.published, parse_rfc3339("2026-11-10T12:00:00Z"));
+    assert_eq!(p.in_reply_to, None);
+    assert!(!p.sensitive);
+}
+
+#[test]
+fn lemmy_comment() {
+    let p = parse_post(&load("lemmy_comment")).unwrap();
+    assert_eq!(p.uri, "https://lemmy.example/comment/7");
+    assert_eq!(p.name, None);
+    assert_eq!(p.content_text, "Clone it first, optimise later.");
+    assert_eq!(
+        p.in_reply_to.as_deref(),
+        Some("https://lemmy.example/post/42")
+    );
+    assert_eq!(p.language.as_deref(), Some("en"));
+}
+
+#[test]
+fn lemmy_language_forms() {
+    let base = load("lemmy_comment");
+    let with_language = |language: Value| {
+        let mut v = base.clone();
+        v["language"] = language;
+        parse_post(&v).unwrap().language
+    };
+    assert_eq!(with_language(json!("de")).as_deref(), Some("de"));
+    assert_eq!(
+        with_language(json!([{"identifier": "fr", "name": "Français"}])).as_deref(),
+        Some("fr")
+    );
+    assert_eq!(
+        with_language(json!({"identifier": "und", "name": "Undetermined"})),
+        None
+    );
+    assert_eq!(with_language(json!({"name": "English"})), None);
+    assert_eq!(with_language(json!(7)), None);
+    // `contentMap` wins over `language`.
+    let mut v = base.clone();
+    v["contentMap"] = json!({"nl": "<p>Eerst klonen.</p>"});
+    assert_eq!(parse_post(&v).unwrap().language.as_deref(), Some("nl"));
+}
+
+#[test]
+fn lemmy_person_and_community() {
+    let carol = parse_actor(&load("lemmy_person")).unwrap();
+    assert_eq!(carol.acct, "carol@lemmy.example");
+    assert_eq!(carol.kind, "Person");
+    assert_eq!(carol.summary_text.as_deref(), Some("Rust and gardening."));
+    // Lemmy carries neither flag; consent decides what that means, not parsing.
+    assert!(!carol.discoverable && !carol.indexable);
+    let rust = parse_actor(&load("lemmy_group")).unwrap();
+    assert_eq!(rust.kind, "Group");
+    assert_eq!(rust.acct, "rust@lemmy.example");
+    assert_eq!(rust.name.as_deref(), Some("Rust"));
+    assert_eq!(
+        rust.summary_text.as_deref(),
+        Some("The Rust programming language.")
+    );
+    assert_eq!(rust.inbox, "https://lemmy.example/c/rust/inbox");
+    assert_eq!(
+        rust.shared_inbox.as_deref(),
+        Some("https://lemmy.example/inbox")
+    );
+    assert_eq!(rust.published, parse_rfc3339("2024-06-01T10:00:00Z"));
+    assert_eq!(rust.followers, None, "a bare collection URI has no count");
+}
+
+#[test]
 fn rich_post() {
     let v = json!({
         "id": "https://a.example/n/1",

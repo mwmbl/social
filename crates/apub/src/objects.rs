@@ -38,7 +38,7 @@ pub struct ParsedPost {
     /// Unix seconds.
     pub published: Option<i64>,
     pub updated: Option<i64>,
-    /// BCP 47, from the first key of `contentMap`.
+    /// BCP 47, from the first key of `contentMap`, else Lemmy's `language` object.
     pub language: Option<String>,
     /// Without the `#`.
     pub hashtags: Vec<String>,
@@ -163,7 +163,8 @@ pub fn parse_post(value: &Value) -> Result<ParsedPost, ParseError> {
     let first_mapped = content_map.and_then(|m| m.iter().next());
     let language = first_mapped
         .map(|(lang, _)| lang.trim().to_owned())
-        .filter(|lang| !lang.is_empty());
+        .filter(|lang| !lang.is_empty())
+        .or_else(|| obj.get("language").and_then(language_tag));
     let content_html = string_field(obj, "content").or_else(|| first_mapped?.1.as_str());
     let content_text = content_html.map(html_to_text).unwrap_or_default();
 
@@ -186,6 +187,19 @@ pub fn parse_post(value: &Value) -> Result<ParsedPost, ParseError> {
             .unwrap_or(false),
         uri,
     })
+}
+
+/// Lemmy's `language`: `{"identifier": "en", "name": "English"}`, or a list of those (first),
+/// or a bare tag. `und` (undetermined, Lemmy's default) is no language.
+fn language_tag(value: &Value) -> Option<String> {
+    let tag = match value {
+        Value::String(tag) => tag.as_str(),
+        Value::Object(o) => string_field(o, "identifier")?,
+        Value::Array(items) => return items.iter().find_map(language_tag),
+        _ => return None,
+    }
+    .trim();
+    (!tag.is_empty() && !tag.eq_ignore_ascii_case("und")).then(|| tag.to_owned())
 }
 
 /// Names of `Hashtag` items in `tag` (a list or a single object), without the `#`.
