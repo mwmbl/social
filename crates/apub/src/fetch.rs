@@ -19,7 +19,7 @@
 //! [`Fetcher::deliver`] sends one activity to an inbox with a signed `POST`, under the same
 //! per-host limits, backoff and scheme cache. It follows no redirects and never reads the body.
 //!
-//! Requests are signed: RFC 9421 first, draft-cavage-12 on 401 or 403, and the scheme that works
+//! Requests are signed: RFC 9421 first, draft-cavage-12 on 400, 401 or 403, and the scheme that works
 //! is remembered per host. A `POST` carries `content-digest` (covered by RFC 9421) and `Digest`
 //! (covered by cavage-12). [`Fetcher::host_states`] and [`Fetcher::seed_host`] let the binary
 //! persist that (and the backoff) without this crate knowing about the store.
@@ -405,6 +405,14 @@ fn auth_failed(status: reqwest::StatusCode) -> bool {
     status.as_u16() == 401 || status.as_u16() == 403
 }
 
+/// A 400 may be a signature the server could not parse: Lemmy 0.19 understands only cavage-12
+/// and answers an RFC 9421 signature with 400, not 401 (seen end to end in dev/lemmy). A host
+/// that doesn't check signatures on `GET`s can be cached as RFC 9421 by a fetch, so a 400 is
+/// retried once with the other scheme too.
+fn maybe_bad_signature(status: reqwest::StatusCode) -> bool {
+    status.as_u16() == 400
+}
+
 /// `Retry-After` as seconds from now: delta-seconds or an HTTP date.
 fn parse_retry_after(value: &str, now: i64) -> Option<u64> {
     let value = value.trim();
@@ -759,7 +767,7 @@ impl Fetcher {
     ) -> Result<reqwest::Response, FetchOutcome> {
         let first = entry.first_scheme();
         let response = self.send_once(url, method, first, host, entry).await?;
-        if !auth_failed(response.status()) {
+        if !auth_failed(response.status()) && !maybe_bad_signature(response.status()) {
             Self::note_scheme(&response, first, entry);
             return Ok(response);
         }
@@ -774,10 +782,11 @@ impl Fetcher {
         Ok(response)
     }
 
-    /// A signature that got an answer other than 401, 403, 429 or 5xx was accepted.
+    /// A signature that got an answer other than 400, 401, 403, 429 or 5xx was accepted. A 400
+    /// proves nothing: the request may have been rejected for its signature or for itself.
     fn note_scheme(response: &reqwest::Response, scheme: SignatureScheme, entry: &HostEntry) {
         let status = response.status().as_u16();
-        if status < 500 && status != 429 {
+        if status < 500 && status != 429 && status != 400 {
             entry.remember(scheme);
         }
     }

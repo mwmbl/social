@@ -34,6 +34,8 @@ fn now() -> i64 {
 enum Accepts {
     Either,
     CavageOnly,
+    /// As Lemmy 0.19: an RFC 9421 signature can't be parsed and gets 400, not 401.
+    CavageOnlyBadRequest,
 }
 
 struct Inbox {
@@ -74,6 +76,11 @@ async fn handle(State(inbox): State<Arc<Inbox>>, request: Request) -> Response<B
         "/bad-request" => return status(400),
         _ => {}
     }
+    if inbox.accepts == Accepts::CavageOnlyBadRequest
+        && headers.iter().any(|(n, _)| n == "signature-input")
+    {
+        return status(400);
+    }
     let Ok(signed_by) = signer(&headers) else {
         return status(401);
     };
@@ -82,7 +89,7 @@ async fn handle(State(inbox): State<Arc<Inbox>>, request: Request) -> Response<B
     {
         return status(401);
     }
-    if inbox.accepts == Accepts::CavageOnly && signed_by.scheme != SignatureScheme::Cavage {
+    if inbox.accepts != Accepts::Either && signed_by.scheme != SignatureScheme::Cavage {
         return status(401);
     }
     let content_type = headers
@@ -168,6 +175,42 @@ async fn falls_back_to_cavage_with_digest_and_remembers() {
                 backoff_until: None
             }
         )
+    );
+}
+
+#[tokio::test]
+async fn falls_back_to_cavage_on_400_as_lemmy_answers() {
+    let (inbox, base) = serve(Accepts::CavageOnlyBadRequest).await;
+    let fetcher = fetcher();
+    let inbox_uri = format!("{base}/inbox");
+    assert_eq!(
+        fetcher.deliver(&inbox_uri, BODY).await,
+        DeliveryOutcome::Delivered { status: 202 }
+    );
+    assert_eq!(inbox.requests.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fetcher.deliver(&inbox_uri, BODY).await,
+        DeliveryOutcome::Delivered { status: 202 }
+    );
+    assert_eq!(inbox.requests.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        fetcher.host_states()[0].1.scheme,
+        Some(SignatureScheme::Cavage)
+    );
+}
+
+#[tokio::test]
+async fn a_400_under_both_schemes_is_a_rejection_and_caches_no_scheme() {
+    let (inbox, base) = serve(Accepts::Either).await;
+    let fetcher = fetcher();
+    let outcome = fetcher.deliver(&format!("{base}/bad-request"), BODY).await;
+    assert_eq!(outcome, DeliveryOutcome::Rejected { status: 400 });
+    assert_eq!(inbox.requests.load(Ordering::SeqCst), 2);
+    assert!(
+        fetcher
+            .host_states()
+            .iter()
+            .all(|(_, s)| s.scheme.is_none())
     );
 }
 
