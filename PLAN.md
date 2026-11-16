@@ -716,8 +716,10 @@ when it unfollows, while one with `indexable: false` stays out.
   `software` column in the Data model). Both are looked up **only when the actor lacks
   `discoverable` or `indexable`**, so Mastodon authors cost no extra fetch or query.
 - Software cache: in memory in front of `hosts.software`/`software_checked_at`. A name is
-  trusted for 1 day; a failed lookup is recorded as `software = NULL` and retried after 1 hour,
-  counting as not Lemmy meanwhile. The lookup takes the highest nodeinfo 2.x link (shared with
+  trusted for 1 day. A failed lookup for a host never identified is recorded as
+  `software = NULL` and retried after 1 hour, counting as not Lemmy meanwhile; one for a host
+  whose software was known keeps that name and is retried after 1 hour, so a nodeinfo outage
+  during revalidation doesn't remove a Lemmy host's content. The lookup takes the highest nodeinfo 2.x link (shared with
   FASP registration discovery), which must be on the host's own origin.
 - Lemmy objects: `language` `{"identifier": …}` is mapped when there is no `contentMap` (`und`
   is none); `Page.name` is the title; comments are `Note`s with `inReplyTo`; a community `Group`

@@ -8,7 +8,10 @@
 //!
 //! Software is cached in memory and in `hosts`: a found name for [`SOFTWARE_TTL_SECS`], a
 //! failed lookup (`software = NULL`) for [`SOFTWARE_RETRY_SECS`]. Until a failed lookup is
-//! retried the host counts as not Lemmy: when in doubt, don't index. The context is worked out
+//! retried the host counts as not Lemmy: when in doubt, don't index. A failed lookup for a host
+//! whose software we already knew keeps that name, retried after [`SOFTWARE_RETRY_SECS`], so a
+//! brief nodeinfo outage during revalidation doesn't drop a Lemmy host's content (a host does
+//! not plausibly change software under the same name). The context is worked out
 //! afresh on every fetch of the actor, so revalidation picks up an unfollow or a software change.
 
 use std::collections::HashMap;
@@ -46,6 +49,24 @@ pub fn is_fresh(entry: &HostSoftware, now: i64) -> bool {
         SOFTWARE_RETRY_SECS
     };
     now < entry.checked_at.saturating_add(ttl)
+}
+
+/// The entry to record after a failed lookup, given what was known before: a known name is kept
+/// but counts as fresh for only [`SOFTWARE_RETRY_SECS`]; otherwise the host is unknown.
+#[must_use]
+pub fn after_failure(previous: Option<HostSoftware>, now: i64) -> HostSoftware {
+    match previous.and_then(|p| p.software) {
+        Some(name) => HostSoftware {
+            software: Some(name),
+            checked_at: now
+                .saturating_sub(SOFTWARE_TTL_SECS)
+                .saturating_add(SOFTWARE_RETRY_SECS),
+        },
+        None => HostSoftware {
+            software: None,
+            checked_at: now,
+        },
+    }
 }
 
 /// Works out consent contexts for the worker. Holds its own SQLite connection.
@@ -97,31 +118,39 @@ impl ContextSource {
         if let Some(entry) = self.cached(&host, now) {
             return entry.software;
         }
-        let software = match lookup_software(&self.fetcher, uri).await {
+        let entry = match lookup_software(&self.fetcher, uri).await {
             Ok(name) => {
                 tracing::debug!(host, software = name, "looked up host software");
-                Some(name)
+                HostSoftware {
+                    software: Some(name),
+                    checked_at: now,
+                }
             }
             Err(e) => {
                 tracing::debug!(host, error = %e, "host software lookup failed");
-                None
+                after_failure(self.any_age(&host), now)
             }
         };
-        if let Err(e) = self
-            .store()
-            .set_host_software(&host, software.as_deref(), now)
+        if let Err(e) =
+            self.store()
+                .set_host_software(&host, entry.software.as_deref(), entry.checked_at)
         {
             tracing::error!(host, error = %e, "failed to record host software");
         }
-        self.remember(
-            &host,
-            HostSoftware {
-                software: software.clone(),
-                checked_at: now,
-            },
-            now,
-        );
+        let software = entry.software.clone();
+        self.remember(&host, entry, now);
         software
+    }
+
+    /// Whatever is known about `host`, fresh or not.
+    fn any_age(&self, host: &str) -> Option<HostSoftware> {
+        let in_memory = self
+            .software
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(host)
+            .cloned();
+        in_memory.or_else(|| self.store().host_software(host).ok().flatten())
     }
 
     /// A fresh entry from memory, else from SQLite (which then fills memory).
@@ -180,6 +209,32 @@ mod tests {
         for (actor, expected) in cases {
             assert_eq!(lacks_a_flag(&actor), expected, "{actor}");
         }
+    }
+
+    #[test]
+    fn a_failed_lookup_keeps_a_known_name_for_a_retry_period() {
+        let now = 1_000_000;
+        let known = HostSoftware {
+            software: Some("lemmy".into()),
+            checked_at: now - 2 * SOFTWARE_TTL_SECS,
+        };
+        let kept = after_failure(Some(known), now);
+        assert_eq!(kept.software.as_deref(), Some("lemmy"));
+        assert!(is_fresh(&kept, now));
+        assert!(is_fresh(&kept, now + SOFTWARE_RETRY_SECS - 1));
+        assert!(!is_fresh(&kept, now + SOFTWARE_RETRY_SECS));
+        let unknown = HostSoftware {
+            software: None,
+            checked_at: now - 10,
+        };
+        assert_eq!(
+            after_failure(Some(unknown), now),
+            HostSoftware {
+                software: None,
+                checked_at: now
+            }
+        );
+        assert_eq!(after_failure(None, now).software, None);
     }
 
     #[test]
