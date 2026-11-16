@@ -1,0 +1,20 @@
+{
+  "@context": [
+    "https://join-lemmy.org/context.json",
+    "https://www.w3.org/ns/activitystreams"
+  ],
+  "type": "Person",
+  "id": "https://lemmy.test/u/carol",
+  "preferredUsername": "carol",
+  "inbox": "https://lemmy.test/u/carol/inbox",
+  "outbox": "https://lemmy.test/u/carol/outbox",
+  "publicKey": {
+    "id": "https://lemmy.test/u/carol#main-key",
+    "owner": "https://lemmy.test/u/carol",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxVaDYhSN1rWHXma5tVy9\nrd8zPNiSzp4nRou9UA7RxA++kXfizGj1KMM75xePovuGMoBNOG8ZKuXOSManXFjY\nOD8RNy8Igp2XnjYASM5UyhFj7GzHwikB4RDYyk6lQD2WuDK47CX1NYW93TC0t+UL\nRvLO+g18TyYtdNNVA5oVIc4yRUBUeiyg2dZHMTdOb0COb72VQEAhBReFPavUWCrV\n+fNMqY4PxI2EUQM5HmbOazQjV7F7KTZzyC/rZ0cgf8rOnfLt0nkIA0oA4Yv7i5Gt\nj/A/nYRT8EBOBz2gR5pemVOYJpMkM+UWvsDrtNCOu6oXXSQvWxSwvqDSzLzZbGYe\nSwIDAQAB\n-----END PUBLIC KEY-----\n"
+  },
+  "endpoints": {
+    "sharedInbox": "https://lemmy.test/inbox"
+  },
+  "published": "2026-11-16T23:20:45.342695Z"
+}

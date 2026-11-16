@@ -1,0 +1,32 @@
+{
+  "@context": [
+    "https://join-lemmy.org/context.json",
+    "https://www.w3.org/ns/activitystreams"
+  ],
+  "type": "Page",
+  "id": "https://lemmy.test/post/3",
+  "attributedTo": "https://lemmy.test/u/carol",
+  "to": [
+    "https://lemmy.test/c/rust",
+    "https://www.w3.org/ns/activitystreams#Public"
+  ],
+  "name": "Pattern matching on slices",
+  "cc": [],
+  "content": "<p>Slice patterns make parsers tidy.</p>\n",
+  "mediaType": "text/html",
+  "source": {
+    "content": "Slice patterns make parsers tidy.",
+    "mediaType": "text/markdown"
+  },
+  "attachment": [],
+  "sensitive": false,
+  "published": "2026-11-16T23:31:00.314934Z",
+  "audience": "https://lemmy.test/c/rust",
+  "tag": [
+    {
+      "href": "https://lemmy.test/post/3",
+      "name": "#rust",
+      "type": "Hashtag"
+    }
+  ]
+}

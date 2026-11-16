@@ -1,0 +1,164 @@
+{
+  "@context": [
+    "https://join-lemmy.org/context.json",
+    "https://www.w3.org/ns/activitystreams"
+  ],
+  "type": "OrderedCollection",
+  "id": "https://lemmy.test/c/rust/outbox",
+  "totalItems": 3,
+  "orderedItems": [
+    {
+      "actor": "https://lemmy.test/c/rust",
+      "to": [
+        "https://www.w3.org/ns/activitystreams#Public"
+      ],
+      "object": {
+        "id": "https://lemmy.test/activities/create/ad69d418-603f-4102-a2b8-350189ef6fc1",
+        "actor": "https://lemmy.test/u/carol",
+        "to": [
+          "https://www.w3.org/ns/activitystreams#Public"
+        ],
+        "object": {
+          "type": "Page",
+          "id": "https://lemmy.test/post/3",
+          "attributedTo": "https://lemmy.test/u/carol",
+          "to": [
+            "https://lemmy.test/c/rust",
+            "https://www.w3.org/ns/activitystreams#Public"
+          ],
+          "name": "Pattern matching on slices",
+          "cc": [],
+          "content": "<p>Slice patterns make parsers tidy.</p>\n",
+          "mediaType": "text/html",
+          "source": {
+            "content": "Slice patterns make parsers tidy.",
+            "mediaType": "text/markdown"
+          },
+          "attachment": [],
+          "sensitive": false,
+          "published": "2026-11-16T23:31:00.314934Z",
+          "audience": "https://lemmy.test/c/rust",
+          "tag": [
+            {
+              "href": "https://lemmy.test/post/3",
+              "name": "#rust",
+              "type": "Hashtag"
+            }
+          ]
+        },
+        "cc": [
+          "https://lemmy.test/c/rust"
+        ],
+        "type": "Create",
+        "audience": "https://lemmy.test/c/rust"
+      },
+      "cc": [
+        "https://lemmy.test/c/rust/followers"
+      ],
+      "type": "Announce",
+      "id": "https://lemmy.test/activities/announce/create/ba7c1ce7-f3a6-4746-ac24-545d48b99274"
+    },
+    {
+      "actor": "https://lemmy.test/c/rust",
+      "to": [
+        "https://www.w3.org/ns/activitystreams#Public"
+      ],
+      "object": {
+        "id": "https://lemmy.test/activities/create/4f96aeb6-431c-4fe1-b4bf-13bb4e9b5611",
+        "actor": "https://lemmy.test/u/carol",
+        "to": [
+          "https://www.w3.org/ns/activitystreams#Public"
+        ],
+        "object": {
+          "type": "Page",
+          "id": "https://lemmy.test/post/2",
+          "attributedTo": "https://lemmy.test/u/carol",
+          "to": [
+            "https://lemmy.test/c/rust",
+            "https://www.w3.org/ns/activitystreams#Public"
+          ],
+          "name": "Async runtimes compared 8aaf35",
+          "cc": [],
+          "content": "<p>Tokio, smol and async-std, with benchmarks.</p>\n",
+          "mediaType": "text/html",
+          "source": {
+            "content": "Tokio, smol and async-std, with benchmarks.",
+            "mediaType": "text/markdown"
+          },
+          "attachment": [],
+          "sensitive": false,
+          "published": "2026-11-16T23:20:46.197851Z",
+          "audience": "https://lemmy.test/c/rust",
+          "tag": [
+            {
+              "href": "https://lemmy.test/post/2",
+              "name": "#rust",
+              "type": "Hashtag"
+            }
+          ]
+        },
+        "cc": [
+          "https://lemmy.test/c/rust"
+        ],
+        "type": "Create",
+        "audience": "https://lemmy.test/c/rust"
+      },
+      "cc": [
+        "https://lemmy.test/c/rust/followers"
+      ],
+      "type": "Announce",
+      "id": "https://lemmy.test/activities/announce/create/c86fee5a-a1a9-4f2b-b7c7-5380bc6ff6e4"
+    },
+    {
+      "actor": "https://lemmy.test/c/rust",
+      "to": [
+        "https://www.w3.org/ns/activitystreams#Public"
+      ],
+      "object": {
+        "id": "https://lemmy.test/activities/create/d4c34847-3d42-4905-bff4-62a773b6e68d",
+        "actor": "https://lemmy.test/u/carol",
+        "to": [
+          "https://www.w3.org/ns/activitystreams#Public"
+        ],
+        "object": {
+          "type": "Page",
+          "id": "https://lemmy.test/post/1",
+          "attributedTo": "https://lemmy.test/u/carol",
+          "to": [
+            "https://lemmy.test/c/rust",
+            "https://www.w3.org/ns/activitystreams#Public"
+          ],
+          "name": "Borrow checker tips for beginners 8aaf35",
+          "cc": [],
+          "content": "<p>Lifetimes are easier once you think of them as scopes.</p>\n",
+          "mediaType": "text/html",
+          "source": {
+            "content": "Lifetimes are easier once you think of them as scopes.",
+            "mediaType": "text/markdown"
+          },
+          "attachment": [],
+          "sensitive": false,
+          "published": "2026-11-16T23:20:46.098539Z",
+          "audience": "https://lemmy.test/c/rust",
+          "tag": [
+            {
+              "href": "https://lemmy.test/post/1",
+              "name": "#rust",
+              "type": "Hashtag"
+            }
+          ]
+        },
+        "cc": [
+          "https://lemmy.test/c/rust"
+        ],
+        "type": "Create",
+        "audience": "https://lemmy.test/c/rust"
+      },
+      "cc": [
+        "https://lemmy.test/c/rust/followers"
+      ],
+      "type": "Announce",
+      "id": "https://lemmy.test/activities/announce/create/c358f558-092a-421d-9901-368971390a85"
+    }
+  ]
+}

@@ -289,6 +289,25 @@ mod tests {
         }
     }
 
+    /// A community outbox captured from Lemmy 0.19.13 (dev/lemmy): every item inline, as
+    /// `Announce{Create{Page}}`, with posts only (comments are not in it) and no `first`.
+    #[test]
+    fn captured_lemmy_0_19_outbox() {
+        let page: Value = serde_json::from_str(include_str!(
+            "../../apub/tests/consent/lemmy019_outbox.json"
+        ))
+        .unwrap();
+        assert!(next_of(page.get("first")).is_none());
+        assert_eq!(
+            object_ids("https://lemmy.test/c/rust", true, &page),
+            [
+                "https://lemmy.test/post/3",
+                "https://lemmy.test/post/2",
+                "https://lemmy.test/post/1"
+            ]
+        );
+    }
+
     #[test]
     fn next_pages() {
         assert!(

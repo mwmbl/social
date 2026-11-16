@@ -1,0 +1,32 @@
+{
+  "@context": [
+    "https://join-lemmy.org/context.json",
+    "https://www.w3.org/ns/activitystreams"
+  ],
+  "type": "Group",
+  "id": "https://lemmy.test/c/rust",
+  "preferredUsername": "rust",
+  "inbox": "https://lemmy.test/c/rust/inbox",
+  "followers": "https://lemmy.test/c/rust/followers",
+  "publicKey": {
+    "id": "https://lemmy.test/c/rust#main-key",
+    "owner": "https://lemmy.test/c/rust",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqf9DcqnpCgh92CCeCeP/\nKuWDGvstEmAoyOUU2rGrW4LwFAFxuT/b2eME9T22y8erPKol+IyZvzCMdZ5zMseY\ni8Cu7/E/B6zW81qdbB8N727ahfF2ywM61pzOorfivXrjjipLsWs2NugKn+cYntpI\nJfly+uVwzNxyDHgkDX1MWW9itDCsBgLpOOpN2GE3K6rdltQj619ljPF0hpTHGqcx\nviEiiMSZxjE0qMj8eGEHbKlnLO1gLvHT6qSWUVOya57IYvrO2M3Qt2/e4qx45Jg/\nTDQvW6jgRb9MXMZS9ifETmC250k/QCUHrSvJRiyzmHQ+JHn05p40ONzkUl+HweCv\nUwIDAQAB\n-----END PUBLIC KEY-----\n"
+  },
+  "name": "Rust",
+  "summary": "<p>The Rust programming language</p>\n",
+  "source": {
+    "content": "The Rust programming language",
+    "mediaType": "text/markdown"
+  },
+  "sensitive": false,
+  "attributedTo": "https://lemmy.test/c/rust/moderators",
+  "postingRestrictedToMods": false,
+  "outbox": "https://lemmy.test/c/rust/outbox",
+  "endpoints": {
+    "sharedInbox": "https://lemmy.test/inbox"
+  },
+  "featured": "https://lemmy.test/c/rust/featured",
+  "language": [],
+  "published": "2026-11-16T23:20:46.030441Z"
+}

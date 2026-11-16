@@ -1,0 +1,34 @@
+{
+  "@context": [
+    "https://join-lemmy.org/context.json",
+    "https://www.w3.org/ns/activitystreams"
+  ],
+  "type": "Note",
+  "id": "https://lemmy.test/comment/2",
+  "attributedTo": "https://lemmy.test/u/carol",
+  "to": [
+    "https://www.w3.org/ns/activitystreams#Public"
+  ],
+  "cc": [
+    "https://lemmy.test/c/rust",
+    "https://lemmy.test/u/carol"
+  ],
+  "content": "<p>Smol is underrated, honestly.</p>\n",
+  "inReplyTo": "https://lemmy.test/post/2",
+  "mediaType": "text/html",
+  "source": {
+    "content": "Smol is underrated, honestly.",
+    "mediaType": "text/markdown"
+  },
+  "published": "2026-11-16T23:31:00.436228Z",
+  "tag": [
+    {
+      "href": "https://lemmy.test/u/carol",
+      "name": "@carol@lemmy.test",
+      "type": "Mention"
+    }
+  ],
+  "distinguished": false,
+  "audience": "https://lemmy.test/c/rust",
+  "attachment": []
+}

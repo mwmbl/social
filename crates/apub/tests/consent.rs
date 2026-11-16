@@ -392,6 +392,10 @@ fn posts_with_context() {
     let l_person = load("lemmy_person");
     let l_page = load("lemmy_page");
     let l_comment = load("lemmy_comment");
+    // Captured from dessalines/lemmy:0.19.13 in dev/lemmy.
+    let l19_person = load("lemmy019_person");
+    let l19_page = load("lemmy019_page");
+    let l19_comment = load("lemmy019_comment");
     let m_actor = load("mastodon_actor");
     let m_note = load("mastodon_note");
     let g_actor = load("gotosocial_actor");
@@ -415,6 +419,27 @@ fn posts_with_context() {
             l_person.clone(),
             LEMMY,
             Ok(()),
+        ),
+        (
+            "lemmy 0.19.13 post (captured)",
+            l19_page.clone(),
+            l19_person.clone(),
+            LEMMY,
+            Ok(()),
+        ),
+        (
+            "lemmy 0.19.13 comment, public in to and the community in cc (captured)",
+            l19_comment.clone(),
+            l19_person.clone(),
+            LEMMY,
+            Ok(()),
+        ),
+        (
+            "lemmy 0.19.13 post judged as if not on lemmy (captured)",
+            l19_page,
+            l19_person,
+            NONE,
+            Err(Refusal::NotDiscoverable),
         ),
         (
             "lemmy post judged without knowing the host is lemmy",
