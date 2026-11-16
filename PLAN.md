@@ -205,10 +205,10 @@ is the point.
 ### Data model (SQLite)
 
 **Principle:** as in Mwmbl, the index is the only record of what is indexed. SQLite holds
-operational state only. It must not mirror the index or grow with it: no per-document or
-per-account rows (except `follow_optins`, which is consent state; see below), and no term
-lists. Every table below is bounded by the number of registrations
-and hosts, or by a fixed time window.
+operational state and records of explicit user and admin actions. It must not mirror the
+index or grow with it: no rows per indexed document or account, and no term lists. Every table
+below is bounded by the number of registrations and hosts, by a fixed time window, or by
+explicit user and admin actions.
 
 - **`registrations`**: id, the server's **FASP base URL** (`base_url`; this is what the client
   calls, and it is not always the server's own URL, e.g. Mastodon's is `<server>/api/fasp`),
@@ -238,10 +238,8 @@ and hosts, or by a fixed time window.
   - Rows are cleared once a full sweep that started after them has finished, so it holds at
     most about one sweep period of entries.
 - **`follow_optins`**: actor URI, followed_at. Authors who opted in by following our server
-  actor (Stage 3). This is the one per-account table, allowed because it is consent state, not
-  a mirror of the index: consent has to be known before anything is indexed, so the index
-  can't hold it. It is bounded by explicit user actions, like `forgotten`. A row goes when the
-  author unfollows.
+  actor (Stage 3). A record of a user action, bounded by those actions like `forgotten` is by
+  admin actions. A row goes when the author unfollows.
 - **`forgotten`**: URIs an admin forgot. Permanent, and bounded by admin actions.
 - **`sweep_state`**: the sweep's current page, and when the current and last sweeps started.
 

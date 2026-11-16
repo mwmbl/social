@@ -28,10 +28,10 @@ next to it.
 These are easy to break by accident. Breaking them is a design bug, not a style issue.
 
 1. **The index is the only record of what is indexed.** SQLite holds bounded operational state
-   only: registrations, subscriptions, the fetch queue, hosts, tombstones and the sweep
-   position. It never gets a row per document or per account, and never stores term lists.
-   The one exception is `follow_optins`, which is consent state bounded by user actions (see
-   Stage 3 in `PLAN.md`).
+   (registrations, subscriptions, the fetch queue, hosts, tombstones, the sweep position) and
+   records of explicit user and admin actions (follow opt-ins, forgotten URIs). It never gets
+   a row per document, or per account just because that account was indexed, and never
+   stores term lists.
 2. **Index keys are a pure function of an item's stored fields plus the tokeniser version.**
    Deletion works by reading the stored record and re-tokenising it. Never index a term derived
    from text the item doesn't store. Changing the tokeniser output means bumping its version.
