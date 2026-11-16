@@ -153,6 +153,15 @@ pub fn evaluate_account_in(actor: &Value, context: ConsentContext) -> Result<(),
     Ok(())
 }
 
+/// Has this actor consented to having their posts indexed, given what `context` says about
+/// them? This is the effective `indexable` flag, by the same rule [`evaluate_post_in`] applies:
+/// a literal `true`, or a missing flag when `context` stands in for it. Callers use it to
+/// decide author tombstones, so a Lemmy author without flags doesn't get one.
+#[must_use]
+pub fn posts_consented(actor: &Value, context: ConsentContext) -> bool {
+    flag(actor, "indexable", context)
+}
+
 /// May this object be indexed as a post by `author`, the actor its `attributedTo` names? Only
 /// the author's own flags count.
 pub fn evaluate_post(object: &Value, author: &Value) -> Result<(), Refusal> {

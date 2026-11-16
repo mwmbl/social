@@ -2,7 +2,8 @@
 //! Pleroma and Lemmy serve. Every rule in `apub::consent` has a case here; add one for any change.
 
 use apub::consent::{
-    ConsentContext, Refusal, evaluate_account, evaluate_account_in, evaluate_post, evaluate_post_in,
+    ConsentContext, Refusal, evaluate_account, evaluate_account_in, evaluate_post,
+    evaluate_post_in, posts_consented,
 };
 use serde_json::{Value, json};
 
@@ -634,6 +635,83 @@ fn accounts_with_context() {
         let got = evaluate_account_in(actor, *context);
         if got != *expected {
             failures.push(format!("{name}: expected {expected:?}, got {got:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The effective `indexable` flag, which decides author tombstones. Same rule as for posts.
+#[test]
+fn posts_consented_flag() {
+    let l_person = load("lemmy_person");
+    let m_actor = load("mastodon_actor");
+    let p_actor = load("pleroma_actor");
+    let both = ConsentContext {
+        author_on_lemmy: true,
+        follows_us: true,
+    };
+    let cases: Vec<(&str, Value, ConsentContext, bool)> = vec![
+        ("mastodon, indexable true", m_actor.clone(), NONE, true),
+        (
+            "mastodon, indexable false",
+            with(&m_actor, &json!({"indexable": false}), &[]),
+            NONE,
+            false,
+        ),
+        (
+            "mastodon, indexable false, follows us",
+            with(&m_actor, &json!({"indexable": false}), &[]),
+            FOLLOWS,
+            false,
+        ),
+        (
+            "lemmy without flags, on lemmy",
+            l_person.clone(),
+            LEMMY,
+            true,
+        ),
+        (
+            "lemmy without flags, host unknown",
+            l_person.clone(),
+            NONE,
+            false,
+        ),
+        (
+            "lemmy with indexable false",
+            with(&l_person, &json!({"indexable": false}), &[]),
+            both,
+            false,
+        ),
+        (
+            "lemmy with indexable null",
+            with(&l_person, &json!({"indexable": null}), &[]),
+            LEMMY,
+            false,
+        ),
+        (
+            "indexable as a string",
+            with(&m_actor, &json!({"indexable": "true"}), &[]),
+            FOLLOWS,
+            false,
+        ),
+        (
+            "pleroma (no indexable), follows us",
+            p_actor.clone(),
+            FOLLOWS,
+            true,
+        ),
+        (
+            "pleroma (no indexable), not following",
+            p_actor.clone(),
+            NONE,
+            false,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, actor, context, expected) in &cases {
+        let got = posts_consented(actor, *context);
+        if got != *expected {
+            failures.push(format!("{name}: expected {expected}, got {got}"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
