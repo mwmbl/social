@@ -17,7 +17,7 @@ pub struct Following {
     /// The id of our `Follow` activity.
     pub follow_id: String,
     pub state: FollowState,
-    /// When we sent the follow (Unix seconds).
+    /// When we last sent the follow (Unix seconds): a re-sent follow updates it.
     pub created_at: i64,
 }
 
@@ -65,13 +65,15 @@ impl Store {
             .map_err(ctx(format!("read following of {actor_uri}")))
     }
 
-    /// Marks our follow of `actor_uri` accepted. Returns whether there was one.
+    /// Marks our pending follow of `actor_uri` accepted. Returns whether a pending follow
+    /// became accepted (`false` if there is none, or it was accepted already), so a repeated
+    /// `Accept` is told apart from the first.
     pub fn accept_following(&self, actor_uri: &str) -> Result<bool, StoreError> {
         let changed = self
             .conn
             .execute(
-                "UPDATE following SET state = ?2 WHERE actor_uri = ?1",
-                params![actor_uri, FollowState::Accepted],
+                "UPDATE following SET state = ?2 WHERE actor_uri = ?1 AND state = ?3",
+                params![actor_uri, FollowState::Accepted, FollowState::Pending],
             )
             .map_err(ctx(format!("accept following of {actor_uri}")))?;
         Ok(changed > 0)
@@ -84,6 +86,35 @@ impl Store {
             .conn
             .execute("DELETE FROM following WHERE actor_uri = ?1", [actor_uri])
             .map_err(ctx(format!("remove following of {actor_uri}")))?;
+        Ok(changed > 0)
+    }
+
+    /// Every actor we follow or asked to, oldest first.
+    pub fn list_following(&self) -> Result<Vec<Following>, StoreError> {
+        let op = "list following";
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT actor_uri, inbox, follow_id, state, created_at FROM following
+                 ORDER BY created_at, actor_uri",
+            )
+            .map_err(ctx(op))?;
+        stmt.query_map([], from_row)
+            .map_err(ctx(op))?
+            .collect::<Result<_, _>>()
+            .map_err(ctx(op))
+    }
+
+    /// Records that our follow of `actor_uri` was sent again at `now`. Returns whether there
+    /// was one.
+    pub fn following_resent(&self, actor_uri: &str, now: i64) -> Result<bool, StoreError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE following SET created_at = ?2 WHERE actor_uri = ?1",
+                params![actor_uri, now],
+            )
+            .map_err(ctx(format!("record re-sent follow of {actor_uri}")))?;
         Ok(changed > 0)
     }
 
@@ -123,14 +154,39 @@ mod tests {
         assert_eq!(row.created_at, 10);
         assert_eq!(s.count_following()?, vec![(FollowState::Pending, 1)]);
         assert!(s.accept_following(BOB)?);
+        // A second Accept changes nothing.
+        assert!(!s.accept_following(BOB)?);
         assert_eq!(
             s.following(BOB)?.ok_or("no row")?.state,
             FollowState::Accepted
         );
+        assert!(s.following_resent(BOB, 30)?);
+        assert_eq!(s.following(BOB)?.ok_or("no row")?.created_at, 30);
         assert!(s.remove_following(BOB)?);
         assert!(!s.remove_following(BOB)?);
         assert!(!s.accept_following(BOB)?);
+        assert!(!s.following_resent(BOB, 40)?);
         assert_eq!(s.following(BOB)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn list_is_oldest_first() -> TestResult {
+        let s = Store::open_in_memory()?;
+        assert_eq!(s.list_following()?, Vec::new());
+        s.add_following(
+            "https://l.example/c/b",
+            "https://l.example/c/b/inbox",
+            "f2",
+            20,
+        )?;
+        s.add_following(BOB, "https://gts.example/users/bob/inbox", "f1", 10)?;
+        let uris: Vec<String> = s
+            .list_following()?
+            .into_iter()
+            .map(|f| f.actor_uri)
+            .collect();
+        assert_eq!(uris, [BOB, "https://l.example/c/b"]);
         Ok(())
     }
 }
