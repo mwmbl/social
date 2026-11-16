@@ -212,6 +212,26 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// Moves an item to `not_before` without counting a failed attempt: `attempts` and
+    /// `last_error` are untouched. Only applies while the row still has `reason`, so an item
+    /// upgraded since it was read (an announce for a URI queued for revalidation) keeps its new
+    /// schedule. Returns whether a row was moved.
+    pub fn defer(
+        &self,
+        uri: &str,
+        reason: FetchReason,
+        not_before: i64,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE fetch_queue SET not_before = ?3 WHERE uri = ?1 AND reason = ?2",
+                params![uri, reason, not_before],
+            )
+            .map_err(ctx(format!("defer fetch {uri}")))?;
+        Ok(changed > 0)
+    }
+
     pub fn queue_len(&self) -> Result<usize, StoreError> {
         let n: i64 = self
             .conn
@@ -455,6 +475,25 @@ mod tests {
         assert!(s.complete("u")?);
         assert!(!s.complete("u")?);
         assert_eq!(s.queue_len()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn defer_reschedules_without_counting_an_attempt() -> TestResult {
+        let s = Store::open_in_memory()?;
+        s.enqueue(&item("u", FetchReason::Revalidate, 0), 1, 10)?;
+        s.fail("u", "timeout", 5)?;
+        assert!(s.defer("u", FetchReason::Revalidate, 300)?);
+        assert_eq!(s.next_due(299, 10)?.len(), 0);
+        let row = s.next_due(300, 10)?.into_iter().next().ok_or("empty")?;
+        assert_eq!(row.not_before, 300);
+        assert_eq!(row.attempts, 1, "not bumped");
+        assert_eq!(row.last_error.as_deref(), Some("timeout"), "not replaced");
+        // Upgraded to an announce since it was read: left alone.
+        s.enqueue(&item("u", FetchReason::Announce, 10), 2, 10)?;
+        assert!(!s.defer("u", FetchReason::Revalidate, 900)?);
+        assert_eq!(s.next_due(10, 10)?.len(), 1);
+        assert!(!s.defer("missing", FetchReason::Revalidate, 1)?);
         Ok(())
     }
 

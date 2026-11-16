@@ -285,6 +285,16 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// The key per-host limits are kept under for `uri`: lowercase `host` or `host:port`. `None`
+/// when `uri` does not parse or has no host. Callers that pace fetches per host use this so
+/// they group URIs exactly as the fetcher does.
+#[must_use]
+pub fn uri_host_key(uri: &str) -> Option<String> {
+    let url = Url::parse(uri).ok()?;
+    url.host_str().filter(|h| !h.is_empty())?;
+    Some(host_key(&url))
+}
+
 /// `host` or `host:port`, lowercase.
 fn host_key(url: &Url) -> String {
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
@@ -356,6 +366,12 @@ impl Fetcher {
                 state: Mutex::new(HostState::default()),
             })
         }))
+    }
+
+    /// Simultaneous fetches allowed per host (`FetcherConfig::per_host_concurrency`).
+    #[must_use]
+    pub fn per_host_concurrency(&self) -> usize {
+        self.per_host_concurrency
     }
 
     /// What we know about each host, for the binary to persist.
@@ -753,6 +769,20 @@ mod tests {
         assert_eq!(parse_retry_after(&date, now), Some(90));
         assert_eq!(parse_retry_after(&http_date(now - 90), now), Some(0));
         assert_eq!(parse_retry_after("soon", now), None);
+    }
+
+    #[test]
+    fn uri_host_keys() {
+        let key = |uri| uri_host_key(uri);
+        assert_eq!(key("https://A.Example/x").as_deref(), Some("a.example"));
+        assert_eq!(
+            key("http://a.example:8080/x").as_deref(),
+            Some("a.example:8080")
+        );
+        // The scheme's default port is not part of the key, as in `Url::port`.
+        assert_eq!(key("https://a.example:443/x").as_deref(), Some("a.example"));
+        assert_eq!(key("not a uri"), None);
+        assert_eq!(key("mailto:a@b.example"), None);
     }
 
     #[test]
