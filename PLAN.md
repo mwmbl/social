@@ -550,6 +550,14 @@ removes it.
 edited and deleted public posts from opted-in accounts show up in or vanish from `search`.
 Unlisted posts and non-indexable accounts never appear.
 
+**Status (2026-11-16): met against Mastodon 4.7.5** in dev/mastodon, with `AUTHORIZED_FETCH`:
+registration and approval (Mastodon verified our signed `provider_info`), `data_sharing`
+activation (2 subscriptions, 2 backfills), backfill indexing alice's public post but not her
+unlisted one nor non-indexable bob's posts. A new post appears; an edit applies after the
+4-minute delay; a delete removes it and leaves a tombstone; alice turning off `indexable`
+removes her posts and keeps her account. Items 6 (tuning revalidation against real servers'
+per-host budgets) and a hosted sign-up page remain.
+
 ### Stage 2: FASP `account_search`
 
 1. `GET /account_search/v0/search` with `term`, `limit` and `language` (RFC 4647 basic

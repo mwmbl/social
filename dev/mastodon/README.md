@@ -41,3 +41,16 @@ docker compose down -v         # throw everything away
 
 Findings from running it are recorded in `PLAN.md` (for example, Mastodon does not advertise
 `faspBaseUrl` in its nodeinfo).
+
+The Stage 1 check (FASP registration and `data_sharing`):
+
+```sh
+docker compose exec social mwmbl-social register https://mastodon.test
+docker compose run --rm web bin/rails runner /seed/fasp.rb approve           # Mastodon calls provider_info
+docker compose run --rm web bin/rails runner /seed/fasp.rb enable data_sharing
+docker compose exec social mwmbl-social search posts garlic                   # backfilled
+```
+
+Then post, edit and delete as alice (`PostStatusService`, `UpdateStatusService`,
+`RemoveStatusService` in `bin/rails runner`) and watch the index follow. Edits and account
+updates take about 4 minutes to apply, on purpose (see `PLAN.md`).
