@@ -9,11 +9,16 @@
 //!   lookup may miss.
 //! - An author who is no longer `indexable` gets an author tombstone; one who is indexable again
 //!   has it cleared. An author who is no longer `discoverable` also loses their account record.
+//! - Consent is judged with the author's [`ConsentContext`] (their host runs Lemmy, or they follow
+//!   our actor), which stands in for flags the actor doesn't carry. The effective `indexable`
+//!   ([`posts_consented`]) decides the author tombstone, never the parsed flag alone.
 //! - Transient failures (backoff, rate limits, network errors) retry, and so does a refused
 //!   signed fetch until it has failed `REFUSED_ATTEMPTS` times: then we can't confirm consent,
 //!   and we remove.
 
-use apub::consent::{Refusal, evaluate_account, evaluate_post};
+use apub::consent::{
+    ConsentContext, Refusal, evaluate_account_in, evaluate_post_in, posts_consented,
+};
 use apub::objects::{parse_actor, parse_post};
 use serde_json::Value;
 use social_index::{SocialAccount, SocialPost};
@@ -132,6 +137,7 @@ fn remove_account(uri: &str, reason: FetchReason, carried: Option<SocialAccount>
 /// What an actor we fetched means for the accounts index and for its posts.
 fn account_actions(
     actor_json: &Value,
+    context: ConsentContext,
     carried: Option<SocialAccount>,
     reason: FetchReason,
     now: i64,
@@ -146,10 +152,10 @@ fn account_actions(
             reason: "actor without an id".into(),
         }];
     };
-    match (evaluate_account(actor_json), parsed) {
+    match (evaluate_account_in(actor_json, context), parsed) {
         (Ok(()), Ok(actor)) => {
             let record = account_record(&actor, carried.as_ref(), now);
-            let tombstone_change = if actor.indexable {
+            let tombstone_change = if posts_consented(actor_json, context) {
                 Action::ClearAuthorTombstone { actor_uri: uri }
             } else {
                 Action::AddAuthorTombstone { actor_uri: uri }
@@ -166,6 +172,13 @@ fn account_actions(
     }
 }
 
+/// The fetch of a post's author, with what the caller knows about the author beyond its JSON.
+#[derive(Debug, Clone, Copy)]
+pub struct Author<'a> {
+    pub fetched: &'a Fetched,
+    pub context: ConsentContext,
+}
+
 /// Decide what a fetched post means. `author` is the fetch of the post's `attributedTo`,
 /// which the caller makes only when the post itself was found.
 #[must_use]
@@ -175,7 +188,7 @@ pub fn decide_post(
     attempts: i64,
     carried: Option<SocialPost>,
     object: &Fetched,
-    author: Option<&Fetched>,
+    author: Option<Author<'_>>,
     now: i64,
 ) -> Vec<Action> {
     let json = match object {
@@ -188,23 +201,28 @@ pub fn decide_post(
     if json.get("id").and_then(Value::as_str) != Some(uri) {
         return remove_post(uri, reason, carried);
     }
-    let author_json = match author {
+    let author_context = author.map_or(ConsentContext::NONE, |a| a.context);
+    let author_json = match author.map(|a| a.fetched) {
         Some(Fetched::Found(a)) => a,
         Some(Fetched::Transient(e)) => return vec![Action::Retry { reason: e.clone() }],
         Some(Fetched::Refused) => return retry_or_remove_post(uri, reason, attempts, carried),
         // A post whose author is gone, or that names no fetchable author, can't be consented.
         Some(Fetched::Gone) | None => return remove_post(uri, reason, carried),
     };
-    match (evaluate_post(json, author_json), parse_post(json)) {
+    match (
+        evaluate_post_in(json, author_json, author_context),
+        parse_post(json),
+    ) {
         (Ok(()), Ok(post)) => {
             let mut actions = vec![Action::IndexPost {
                 record: post_record(&post, now),
                 replaces: carried,
             }];
             // The author we fetched anyway is worth indexing too, if they're discoverable.
-            if evaluate_account(author_json).is_ok() {
+            if evaluate_account_in(author_json, author_context).is_ok() {
                 actions.extend(account_actions(
                     author_json,
+                    author_context,
                     None,
                     FetchReason::Backfill,
                     now,
@@ -216,6 +234,7 @@ pub fn decide_post(
             let mut actions = remove_post(uri, reason, carried);
             actions.extend(account_actions(
                 author_json,
+                author_context,
                 None,
                 FetchReason::Backfill,
                 now,
@@ -226,7 +245,8 @@ pub fn decide_post(
     }
 }
 
-/// Decide what a fetched actor means.
+/// Decide what a fetched actor means. `context` is what the caller knows about the actor
+/// beyond its JSON.
 #[must_use]
 pub fn decide_account(
     uri: &str,
@@ -234,11 +254,12 @@ pub fn decide_account(
     attempts: i64,
     carried: Option<SocialAccount>,
     actor: &Fetched,
+    context: ConsentContext,
     now: i64,
 ) -> Vec<Action> {
     match actor {
         Fetched::Found(json) if json.get("id").and_then(Value::as_str) == Some(uri) => {
-            account_actions(json, carried, reason, now)
+            account_actions(json, context, carried, reason, now)
         }
         Fetched::Refused if attempts + 1 < REFUSED_ATTEMPTS => {
             vec![Action::Retry {
@@ -272,6 +293,24 @@ mod tests {
             "discoverable": discoverable, "indexable": indexable}),
         )
     }
+
+    /// An actor with neither `discoverable` nor `indexable`, as Lemmy and `GoToSocial` serve.
+    fn bare_author() -> Fetched {
+        Fetched::Found(
+            json!({"id": AUTHOR, "type": "Person", "preferredUsername": "a",
+            "name": "A", "inbox": format!("{AUTHOR}/inbox")}),
+        )
+    }
+
+    const LEMMY: ConsentContext = ConsentContext {
+        author_on_lemmy: true,
+        follows_us: false,
+    };
+    const FOLLOWS: ConsentContext = ConsentContext {
+        author_on_lemmy: false,
+        follows_us: true,
+    };
+    const NONE: ConsentContext = ConsentContext::NONE;
 
     fn note(to: &str) -> Fetched {
         Fetched::Found(
@@ -343,6 +382,7 @@ mod tests {
         carried: Option<SocialPost>,
         object: Fetched,
         author: Option<Fetched>,
+        context: ConsentContext,
         expected: &'static [&'static str],
     }
 
@@ -361,8 +401,74 @@ mod tests {
             carried,
             object,
             author,
+            context: ConsentContext::NONE,
             expected,
         }
+    }
+
+    fn context_case(
+        name: &'static str,
+        author: Fetched,
+        context: ConsentContext,
+        expected: &'static [&'static str],
+    ) -> PostCase {
+        PostCase {
+            context,
+            ..post_case(
+                name,
+                Revalidate,
+                Some(stored_post()),
+                note(PUBLIC),
+                Some(author),
+                expected,
+            )
+        }
+    }
+
+    /// The author's context stands in for flags the actor doesn't carry, and decides the author
+    /// tombstone the same way.
+    fn context_post_cases() -> Vec<PostCase> {
+        vec![
+            context_case("lemmy author without flags", bare_author(), LEMMY, REPLACED),
+            context_case(
+                "same author, host not known to be lemmy",
+                bare_author(),
+                ConsentContext::NONE,
+                &[
+                    "remove post",
+                    "remove account + tombstone",
+                    "author tombstone",
+                ],
+            ),
+            context_case(
+                "follower without flags: indexed, no author tombstone",
+                bare_author(),
+                FOLLOWS,
+                REPLACED,
+            ),
+            context_case(
+                "follower with explicit indexable false",
+                author(true, false),
+                FOLLOWS,
+                &["remove post", "index account", "author tombstone"],
+            ),
+            context_case(
+                "lemmy author with explicit indexable false",
+                author(true, false),
+                LEMMY,
+                &["remove post", "index account", "author tombstone"],
+            ),
+            context_case(
+                "follower with explicit discoverable false",
+                author(false, true),
+                FOLLOWS,
+                &[
+                    "remove post",
+                    "remove account + tombstone",
+                    "author tombstone",
+                ],
+            ),
+        ]
     }
 
     const INDEXED: &[&str] = &["index post", "index account", "clear author tombstone"];
@@ -522,14 +628,21 @@ mod tests {
     #[test]
     fn posts() {
         let mut failures = Vec::new();
-        for c in post_cases().into_iter().chain(more_post_cases()) {
+        for c in post_cases()
+            .into_iter()
+            .chain(more_post_cases())
+            .chain(context_post_cases())
+        {
             let got = decide_post(
                 POST,
                 c.reason,
                 c.attempts,
                 c.carried,
                 &c.object,
-                c.author.as_ref(),
+                c.author.as_ref().map(|fetched| Author {
+                    fetched,
+                    context: c.context,
+                }),
                 NOW,
             );
             let got: Vec<_> = got.iter().map(kind).collect();
@@ -551,7 +664,10 @@ mod tests {
             0,
             Some(stored_post()),
             &note(PUBLIC),
-            Some(&author(true, true)),
+            Some(Author {
+                fetched: &author(true, true),
+                context: ConsentContext::NONE,
+            }),
             NOW,
         );
         let Some(Action::IndexPost { record, replaces }) = got.first() else {
@@ -571,6 +687,7 @@ mod tests {
         i64,
         Option<SocialAccount>,
         Fetched,
+        ConsentContext,
         &'static [&'static str],
     );
 
@@ -586,6 +703,7 @@ mod tests {
                 0,
                 None,
                 author(true, true),
+                NONE,
                 &["index account", "clear author tombstone"],
             ),
             (
@@ -594,6 +712,7 @@ mod tests {
                 0,
                 None,
                 author(true, false),
+                NONE,
                 &["index account", "author tombstone"],
             ),
             (
@@ -602,6 +721,7 @@ mod tests {
                 0,
                 None,
                 author(false, true),
+                NONE,
                 removed_new,
             ),
             (
@@ -610,15 +730,25 @@ mod tests {
                 0,
                 Some(stored_account()),
                 author(false, false),
+                NONE,
                 &["remove account", "author tombstone"],
             ),
-            ("deleted", Announce, 0, None, Fetched::Gone, removed_new),
+            (
+                "deleted",
+                Announce,
+                0,
+                None,
+                Fetched::Gone,
+                NONE,
+                removed_new,
+            ),
             (
                 "served under another id",
                 Announce,
                 0,
                 None,
                 other,
+                NONE,
                 removed_new,
             ),
             (
@@ -627,6 +757,7 @@ mod tests {
                 0,
                 Some(stored_account()),
                 Fetched::Refused,
+                NONE,
                 RETRY,
             ),
             (
@@ -635,13 +766,62 @@ mod tests {
                 REFUSED_ATTEMPTS,
                 Some(stored_account()),
                 Fetched::Refused,
+                NONE,
                 &["remove account", "author tombstone"],
             ),
-            ("transient", Announce, 0, None, transient(), RETRY),
+            ("transient", Announce, 0, None, transient(), NONE, RETRY),
         ];
+        check_accounts(cases);
+    }
+
+    /// Context stands in for flags the actor doesn't carry.
+    #[test]
+    fn accounts_with_context() {
+        let removed_new: &[&str] = &["remove account + tombstone", "author tombstone"];
+        check_accounts(vec![
+            (
+                "lemmy actor without flags",
+                Announce,
+                0,
+                None,
+                bare_author(),
+                LEMMY,
+                &["index account", "clear author tombstone"],
+            ),
+            (
+                "same actor, host not known to be lemmy",
+                Announce,
+                0,
+                None,
+                bare_author(),
+                NONE,
+                removed_new,
+            ),
+            (
+                "follower without flags",
+                Revalidate,
+                0,
+                Some(stored_account()),
+                bare_author(),
+                FOLLOWS,
+                &["index account", "clear author tombstone"],
+            ),
+            (
+                "follower with explicit indexable false",
+                Revalidate,
+                0,
+                Some(stored_account()),
+                author(true, false),
+                FOLLOWS,
+                &["index account", "author tombstone"],
+            ),
+        ]);
+    }
+
+    fn check_accounts(cases: Vec<AccountCase>) {
         let mut failures = Vec::new();
-        for (name, reason, attempts, carried, actor, expected) in cases {
-            let got = decide_account(AUTHOR, reason, attempts, carried, &actor, NOW);
+        for (name, reason, attempts, carried, actor, context, expected) in cases {
+            let got = decide_account(AUTHOR, reason, attempts, carried, &actor, context, NOW);
             let got: Vec<_> = got.iter().map(kind).collect();
             if got != expected {
                 failures.push(format!("{name}: expected {expected:?}, got {got:?}"));

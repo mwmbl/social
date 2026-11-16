@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use apub::consent::ConsentContext;
 use apub::fetch::{FetchOutcome, Fetcher, HostSnapshot, SignatureScheme as FetchScheme};
 use serde_json::Value;
 use social_index::{SocialAccount, SocialPost};
@@ -20,7 +21,7 @@ use tokio::task::JoinSet;
 use url::Url;
 
 use crate::decide::{
-    Action, Carried, Fetched, author_of, decide_account, decide_post, looks_like_post,
+    Action, Author, Carried, Fetched, author_of, decide_account, decide_post, looks_like_post,
 };
 use crate::pacing::{Pacer, Plan, Running, ToDefer, candidate_limit, plan};
 use crate::writer::{WriterHandle, host_blocked};
@@ -516,6 +517,7 @@ impl Worker {
                     item.attempts,
                     carried_account,
                     &fetched,
+                    ConsentContext::NONE,
                     now,
                 )
             }
@@ -523,7 +525,15 @@ impl Worker {
                 // We don't know whether it was a post or an actor, and it is not there to say:
                 // remove it as both.
                 let post = decide_post(uri, item.reason, item.attempts, None, &fetched, None, now);
-                let account = decide_account(uri, item.reason, item.attempts, None, &fetched, now);
+                let account = decide_account(
+                    uri,
+                    item.reason,
+                    item.attempts,
+                    None,
+                    &fetched,
+                    ConsentContext::NONE,
+                    now,
+                );
                 if post
                     .iter()
                     .chain(&account)
@@ -566,7 +576,10 @@ impl Worker {
             item.attempts,
             carried,
             fetched,
-            author.as_ref(),
+            author.as_ref().map(|fetched| Author {
+                fetched,
+                context: ConsentContext::NONE,
+            }),
             now,
         )
     }
