@@ -1,6 +1,6 @@
 //! The `tombstones` table: deletes and opt-outs not yet applied to every copy in the index.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::enums::TombstoneKind;
 use crate::error::ctx;
@@ -26,6 +26,15 @@ impl Store {
             )
             .map_err(ctx(format!("forget {uri}")))?;
         Ok(())
+    }
+
+    /// Whether `uri` was forgotten.
+    pub fn is_forgotten(&self, uri: &str) -> Result<bool, StoreError> {
+        self.conn
+            .query_row("SELECT 1 FROM forgotten WHERE uri = ?1", [uri], |_| Ok(()))
+            .optional()
+            .map(|found| found.is_some())
+            .map_err(ctx(format!("read forgotten {uri}")))
     }
 
     /// Every forgotten URI.
@@ -110,6 +119,8 @@ mod tests {
             .unwrap();
         assert_eq!(store.clear_tombstones_before(100).unwrap(), 1);
         assert_eq!(store.list_forgotten().unwrap(), ["https://h.example/u/a"]);
+        assert!(store.is_forgotten("https://h.example/u/a").unwrap());
+        assert!(!store.is_forgotten("https://h.example/u/b").unwrap());
     }
 
     use super::*;

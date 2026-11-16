@@ -135,6 +135,14 @@ string_enum!(
     }
 );
 
+string_enum!(
+    /// Whether an actor we follow has accepted our follow.
+    FollowState, "follow state", {
+        Pending => "pending",
+        Accepted => "accepted",
+    }
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

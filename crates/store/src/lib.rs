@@ -25,6 +25,7 @@
 mod enums;
 mod error;
 mod follow_optins;
+mod following;
 mod hosts;
 mod queue;
 mod registrations;
@@ -39,11 +40,12 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 pub use enums::{
-    BackfillState, Category, FetchKind, FetchReason, RegistrationStatus, SignatureScheme,
-    SubscriptionType, TombstoneKind,
+    BackfillState, Category, FetchKind, FetchReason, FollowState, RegistrationStatus,
+    SignatureScheme, SubscriptionType, TombstoneKind,
 };
 pub use error::StoreError;
 pub use follow_optins::FollowOptin;
+pub use following::Following;
 pub use hosts::{DomainBlock, Host, HostSoftware};
 pub use queue::{EnqueueOutcome, NewFetch, QueuedFetch};
 pub use registrations::{NewRegistration, Registration};

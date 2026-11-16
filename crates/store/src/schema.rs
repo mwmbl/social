@@ -122,4 +122,16 @@ CREATE TABLE follow_optins (
     followed_at INTEGER NOT NULL
 );
 ",
+    "
+-- Actors our server actor follows: authors who followed us (the follow-back, PLAN.md Stage 3)
+-- and, later, communities an admin chose. Our Follow activity's id is kept so we can Undo it
+-- and match the Accept. Bounded by follow opt-ins and admin actions, never by the index.
+CREATE TABLE following (
+    actor_uri  TEXT PRIMARY KEY,
+    inbox      TEXT NOT NULL,
+    follow_id  TEXT NOT NULL,
+    state      TEXT NOT NULL CHECK (state IN ('pending','accepted')),
+    created_at INTEGER NOT NULL
+);
+",
 ];
