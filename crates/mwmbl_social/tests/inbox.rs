@@ -18,7 +18,7 @@ use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::Response;
 use common::PUBLIC;
-use mwmbl_social::cli::serve_on;
+use mwmbl_social::cli::{follow, following, serve_on, unfollow};
 use mwmbl_social::config::Config;
 use mwmbl_social::now_secs;
 use serde_json::{Value, json};
@@ -120,6 +120,21 @@ async fn serve_host(State(state): State<Arc<HostState>>, request: Request) -> Re
 }
 
 impl FakeHost {
+    /// `host:port`, for handles.
+    fn authority(&self) -> &str {
+        self.origin.trim_start_matches("http://")
+    }
+
+    /// Answers `WebFinger` (for any resource) with `actor` as the `self` link.
+    fn webfinger(&self, name: &str, actor: &str) {
+        self.set(
+            "/.well-known/webfinger",
+            json!({"subject": format!("acct:{name}@{}", self.authority()), "links": [
+                {"rel": "self", "type": "application/activity+json", "href": actor},
+            ]}),
+        );
+    }
+
     async fn start(software: &str) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -209,10 +224,14 @@ struct Ours {
 
 impl Ours {
     async fn start() -> Self {
+        Self::start_with(|_| {}).await
+    }
+
+    async fn start_with(configure: impl FnOnce(&mut Config)) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let config = Config {
+        let mut config = Config {
             data_dir: dir.path().to_path_buf(),
             listen: addr.to_string(),
             base_url: Some(format!("http://{addr}")),
@@ -221,6 +240,7 @@ impl Ours {
             allow_http: true,
             ..Config::default()
         };
+        configure(&mut config);
         let (shutdown, shutdown_rx) = watch::channel(false);
         tokio::spawn(serve_on(config.clone(), listener, shutdown_rx));
         let ours = Self {
@@ -641,14 +661,20 @@ async fn a_followed_lemmy_community_relays_posts_and_removals() {
             "published": "2026-11-10T12:00:00Z",
         }),
     );
-    // An admin follows the community (the CLI for that comes later), and it accepted.
-    let store = ours.store();
-    assert!(
-        store
-            .add_following(&community, &format!("{community}/inbox"), "x", now_secs())
-            .unwrap()
+    // An admin follows the community, and it accepts.
+    let followed = follow(&ours.config, &community).await.unwrap();
+    assert_eq!(followed["delivered"], true);
+    let our_follow = lemmy.delivered_to("/c/garden", "Follow")[0].clone();
+    let accept = json!({"type": "Accept", "actor": community, "object": our_follow});
+    assert_eq!(
+        ours.deliver(&accept, &community, KEY_A, SignatureScheme::Cavage)
+            .await,
+        202
     );
-    store.accept_following(&community).unwrap();
+    wait_until("our follow to be accepted", async || {
+        ours.store().following(&community).unwrap().unwrap().state == FollowState::Accepted
+    })
+    .await;
 
     let announce = |inner: Value| json!({"type": "Announce", "actor": community, "object": inner});
     let create = json!({"type": "Create", "actor": carol, "to": [PUBLIC],
@@ -692,4 +718,157 @@ async fn a_followed_lemmy_community_relays_posts_and_removals() {
             .any(|t| t.uri == page && t.kind == TombstoneKind::Object),
         "{tombstones:?}"
     );
+}
+
+fn lemmy_page(id: &str, author: &str, community: &str, title: &str) -> Value {
+    json!({
+        "@context": ["https://join-lemmy.org/context.json", "https://www.w3.org/ns/activitystreams"],
+        "id": id,
+        "type": "Page",
+        "attributedTo": author,
+        "to": [community, PUBLIC],
+        "cc": [],
+        "audience": community,
+        "name": title,
+        "content": "<p>Ownership and borrowing.</p>",
+        "published": "2026-11-10T12:00:00Z",
+    })
+}
+
+#[tokio::test]
+async fn an_admin_follow_of_a_lemmy_community_backfills_its_outbox() {
+    let ours = Ours::start().await;
+    let lemmy = FakeHost::start("lemmy").await;
+    let other = FakeHost::start("lemmy").await;
+    ours.introduce(&lemmy).await;
+    let community = lemmy.actor("/c/rust", "Group", KEY_A, &json!({}));
+    lemmy.webfinger("rust", &community);
+    // Flagless Lemmy authors, one on another instance.
+    let carol = lemmy.actor("/u/carol", "Person", KEY_B, &json!({}));
+    let dan = other.actor("/u/dan", "Person", KEY_B, &json!({}));
+    let local = lemmy.url("/post/1");
+    let remote = other.url("/post/9");
+    lemmy.set(
+        "/post/1",
+        lemmy_page(&local, &carol, &community, "Lifetimes explained"),
+    );
+    other.set(
+        "/post/9",
+        lemmy_page(&remote, &dan, &community, "Lifetimes in async code"),
+    );
+    let boosted = other.url("/post/boosted");
+    let announce = |object: &Value| json!({"type": "Announce", "actor": community, "to": [PUBLIC], "object": object});
+    lemmy.set(
+        "/c/rust/outbox",
+        json!({
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": lemmy.url("/c/rust/outbox"),
+            "type": "OrderedCollection",
+            "orderedItems": [
+                announce(&json!({"type": "Create", "actor": carol,
+                    "object": {"id": local, "type": "Page", "name": "Not what is indexed"}})),
+                announce(&json!({"type": "Create", "actor": dan,
+                    "object": {"id": remote, "type": "Page"}})),
+                announce(&json!(boosted)),
+            ],
+        }),
+    );
+
+    // `follow !rust@host`: WebFinger, the actor, and our Follow, which the fake verifies.
+    let handle = format!("!rust@{}", lemmy.authority());
+    let followed = follow(&ours.config, &handle).await.unwrap();
+    assert_eq!(followed["actor"], community);
+    assert_eq!(followed["type"], "community");
+    assert_eq!(followed["delivered"], true);
+    assert!(lemmy.hits("/.well-known/webfinger") > 0);
+    let our_follow = lemmy.delivered_to("/c/rust", "Follow")[0].clone();
+    assert_eq!(our_follow["actor"], ours.actor());
+    assert_eq!(our_follow["object"], community);
+    assert_eq!(*lemmy.state.unverified.lock().unwrap(), 0);
+    let listed = following(&ours.config).unwrap();
+    assert_eq!(listed[0]["actor"], community);
+    assert_eq!(listed[0]["state"], "pending");
+    // Following again changes nothing.
+    let again = follow(&ours.config, &community).await.unwrap();
+    assert_eq!(again["note"], "already followed");
+    assert_eq!(lemmy.delivered_to("/c/rust", "Follow").len(), 1);
+
+    // The community accepts: the server reads its outbox and queues the posts.
+    let accept = json!({"id": lemmy.url("/activities/accept/1"), "type": "Accept",
+        "actor": community, "object": our_follow});
+    assert_eq!(
+        ours.deliver(&accept, &community, KEY_A, SignatureScheme::Rfc9421)
+            .await,
+        202
+    );
+    wait_until("the outbox's posts to be indexed", async || {
+        let mut found = ours.search("lifetimes").await;
+        let mut want = vec![local.clone(), remote.clone()];
+        found.sort();
+        want.sort();
+        found == want
+    })
+    .await;
+    assert_eq!(
+        ours.store().following(&community).unwrap().unwrap().state,
+        FollowState::Accepted
+    );
+    assert_eq!(lemmy.hits("/c/rust/outbox"), 1);
+    // The boost of a post was not fetched.
+    assert_eq!(other.hits("/post/boosted"), 0);
+
+    // `unfollow`: our Undo, and the row goes. The posts stay: their authors' consent stands.
+    let unfollowed = unfollow(&ours.config, &handle).await.unwrap();
+    assert_eq!(unfollowed["delivered"], true);
+    let undo = &lemmy.delivered_to("/c/rust", "Undo")[0];
+    assert_eq!(undo["object"]["id"], our_follow["id"]);
+    assert_eq!(ours.store().following(&community).unwrap(), None);
+    assert_eq!(following(&ours.config).unwrap(), json!([]));
+    assert_eq!(ours.search("lifetimes").await.len(), 2);
+    assert!(unfollow(&ours.config, &community).await.is_err());
+}
+
+#[tokio::test]
+async fn configured_follows_are_followed_at_start_up() {
+    let lemmy = FakeHost::start("lemmy").await;
+    let community = lemmy.actor("/c/tea", "Group", KEY_A, &json!({}));
+    lemmy.webfinger("tea", &community);
+    // A post, not an actor: not followed.
+    lemmy.set("/post/1", note(&lemmy.url("/post/1"), &community, "x"));
+    // A follow pending for two days, sent before this server started.
+    let stale = lemmy.actor("/c/coffee", "Group", KEY_A, &json!({}));
+    let targets = vec![format!("!tea@{}", lemmy.authority()), lemmy.url("/post/1")];
+    let ours = Ours::start_with(|c| {
+        c.follow = targets;
+        // Our key exists before the server starts, so the fake can check its first deliveries.
+        let key = mwmbl_social::keys::load_or_generate(&c.keys_dir()).unwrap();
+        *lemmy.state.our_key.lock().unwrap() = Some(key.verifying_key());
+        let store = Store::open(&c.store_path()).unwrap();
+        let inbox = format!("{stale}/inbox");
+        store
+            .add_following(&stale, &inbox, "old-follow", now_secs() - 2 * 86_400)
+            .unwrap();
+    })
+    .await;
+    wait_until("the configured follow", async || {
+        ours.store().following(&community).unwrap().is_some()
+    })
+    .await;
+    wait_until("our Follow", async || {
+        !lemmy.delivered_to("/c/tea", "Follow").is_empty()
+    })
+    .await;
+    // The stale follow is sent again, under its own id, and is not re-sent at once.
+    wait_until("the re-sent Follow", async || {
+        !lemmy.delivered_to("/c/coffee", "Follow").is_empty()
+    })
+    .await;
+    assert_eq!(
+        lemmy.delivered_to("/c/coffee", "Follow")[0]["id"],
+        "old-follow"
+    );
+    let row = ours.store().following(&stale).unwrap().unwrap();
+    assert!(row.created_at > now_secs() - 60);
+    let listed = following(&ours.config).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 2, "{listed}");
 }

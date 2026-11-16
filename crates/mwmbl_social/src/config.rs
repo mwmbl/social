@@ -75,6 +75,12 @@ pub struct Config {
     /// Serve Prometheus metrics at `/metrics` on the main listener. They are public there, so
     /// firewall the path or proxy it to an internal-only listener.
     pub metrics: bool,
+    /// Actors to follow (`!community@host`, `@user@host`, `user@host` or an actor URI). `serve`
+    /// follows any that aren't followed yet, at start-up and every 6 hours. Removing one does
+    /// not unfollow it; `unfollow` does. The environment override is a comma-separated list.
+    pub follow: Vec<String>,
+    /// How many outbox pages are read when a follow is accepted. 0 turns outbox backfill off.
+    pub outbox_backfill_pages: usize,
     /// Allow `http://` URIs. For tests only.
     pub allow_http: bool,
 }
@@ -105,6 +111,8 @@ impl Default for Config {
             max_transient_attempts: 10,
             backfill_max_count: 100,
             metrics: false,
+            follow: Vec::new(),
+            outbox_backfill_pages: 5,
             allow_http: false,
         }
     }
@@ -214,9 +222,19 @@ impl Config {
             revalidate_interval_per_host_ms,
             max_transient_attempts,
             backfill_max_count,
+            outbox_backfill_pages,
             metrics,
             allow_http,
         );
+        let var = format!("{ENV_PREFIX}FOLLOW");
+        if let Some(value) = env(&var) {
+            self.follow = value
+                .split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
         Ok(())
     }
 
@@ -248,6 +266,12 @@ impl Config {
         }
         if self.backfill_max_count == 0 {
             return Err(invalid("backfill_max_count", "must be greater than 0"));
+        }
+        for target in &self.follow {
+            crate::follows::parse_follow_target(target).map_err(|e| ConfigError::Invalid {
+                field: "follow",
+                reason: e.to_string(),
+            })?;
         }
         if self.privacy_policy_language.trim().is_empty() {
             return Err(invalid("privacy_policy_language", "must not be empty"));
@@ -347,6 +371,8 @@ mod tests {
         assert_eq!(config.fediverse_account, None);
         assert_eq!(config.backfill_max_count, 100);
         assert!(!config.metrics);
+        assert_eq!(config.follow, Vec::<String>::new());
+        assert_eq!(config.outbox_backfill_pages, 5);
         assert_eq!(config.base_url, None);
         config.validate()?;
         assert!(config.require_base_url().is_err());
@@ -369,6 +395,8 @@ mod tests {
             fediverse_account = "@admin@social.example"
             backfill_max_count = 25
             metrics = true
+            follow = ["!rust@lemmy.example", "@alice@m.example"]
+            outbox_backfill_pages = 2
         "#;
         let config = Config::from_sources(Some(("c.toml", text)), env_of(&[]))?;
         assert_eq!(config.base_url.as_deref(), Some("https://social.example"));
@@ -389,6 +417,8 @@ mod tests {
         );
         assert_eq!(config.backfill_max_count, 25);
         assert!(config.metrics);
+        assert_eq!(config.follow, ["!rust@lemmy.example", "@alice@m.example"]);
+        assert_eq!(config.outbox_backfill_pages, 2);
         config.validate()?;
         assert_eq!(
             config.store_path(),
@@ -424,8 +454,15 @@ mod tests {
                 ("MWMBL_SOCIAL_BACKFILL_MAX_COUNT", "7"),
                 ("MWMBL_SOCIAL_METRICS", "true"),
                 ("MWMBL_SOCIAL_REVALIDATE_INTERVAL_PER_HOST_MS", "250"),
+                (
+                    "MWMBL_SOCIAL_FOLLOW",
+                    " !a@l.example, ,https://m.example/users/b ",
+                ),
+                ("MWMBL_SOCIAL_OUTBOX_BACKFILL_PAGES", "0"),
             ]),
         )?;
+        assert_eq!(config.follow, ["!a@l.example", "https://m.example/users/b"]);
+        assert_eq!(config.outbox_backfill_pages, 0);
         assert_eq!(config.revalidate_interval_per_host_ms, 250);
         assert_eq!(config.privacy_policy_language, "fr");
         assert_eq!(config.fediverse_account.as_deref(), Some("@me@x.example"));
@@ -478,6 +515,8 @@ mod tests {
             bad(&|c| c.backfill_max_count = 0).is_some_and(|e| e.contains("backfill_max_count"))
         );
         assert!(bad(&|c| c.privacy_policy_language = " ".into()).is_some());
+        assert!(bad(&|c| c.follow = vec!["rust".into()]).is_some_and(|e| e.contains("follow")));
+        assert!(bad(&|c| c.follow = vec!["!rust@l.example".into()]).is_none());
         assert!(
             bad(&|c| c.base_url = Some("not a url".into())).is_some_and(|e| e.contains("base_url"))
         );

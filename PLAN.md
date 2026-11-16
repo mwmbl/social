@@ -183,7 +183,9 @@ we only need a fixed component set.
   write SQLite (`ingest` enqueues an `announce`; `forget` writes tombstone and domain-block
   rows), and the server's writer reloads tombstones and domain blocks from SQLite every 30
   seconds; the sweep then removes the copies. `search` and `stats` open the indexes read-only
-  and need no lock.
+  and need no lock. `follow` and `unfollow` need no lock either: they write `following` and
+  deliver with their own fetcher and our actor's key, and the server's inbox reads `following`
+  from SQLite on every delivery (nothing about it is cached in memory).
 - Readers use positioned reads concurrently. If a read hits a page mid-write, it gets a
   `PageIoError::Unreadable` and retries. A sharded `RwLock` per page range is the alternative if
   retries prove noisy.
@@ -244,9 +246,9 @@ explicit user and admin actions.
   actor (Stage 3). A record of a user action, bounded by those actions like `forgotten` is by
   admin actions. A row goes when the author unfollows.
 - **`following`**: actor URI, inbox, our `Follow` activity's id, state (pending/accepted),
-  created_at. Actors our server actor follows: follow-backs of opt-ins, and (later)
-  communities an admin chose. Bounded by those actions. The id matches the `Accept` and is
-  what our `Undo` names.
+  created_at (when the `Follow` was last sent). Actors our server actor follows: follow-backs of
+  opt-ins, and communities and accounts an admin chose. Bounded by those actions. The id
+  matches the `Accept` and is what our `Undo` names.
 - **`forgotten`**: URIs an admin forgot. Permanent, and bounded by admin actions.
 - **`sweep_state`**: the sweep's current page, and when the current and last sweeps started.
 
@@ -664,7 +666,8 @@ from the origin ourselves means nothing new is trusted.
 1. Make the server actor able to follow `Group` actors (communities): accept inbox
    deliveries, verify incoming HTTP signatures, and handle
    Create/Update/Delete/Remove/Announce/Undo.
-2. Admins configure which opted-in communities or instances to follow.
+2. Admins choose which opted-in communities (or accounts) to follow: the `follow` command or
+   the `follow` config option (built, see below).
 3. Crawl submission endpoint: an authenticated `POST` taking a batch of object URIs, which go
    on the existing fetch queue (reason `crawl`, lowest priority after backfill). Before
    fetching, the worker checks:
@@ -710,9 +713,9 @@ them, except for paths its robots.txt disallows and replies from non-indexable a
 fake actor without `indexable` that follows us gets its public posts indexed, which are removed
 when it unfollows, while one with `indexable: false` stays out.
 
-**Status (2026-11-16): the consent rules of items 5 and 7 are live in the pipeline.** The inbox
-and follow opt-in are built (below). Admin follows of communities, outbox backfill, crawl
-submissions and robots.txt are not built yet.
+**Status (2026-11-16): the consent rules of items 5 and 7 are live in the pipeline.** The inbox,
+follow opt-in, admin follows and outbox backfill are built (below). Crawl submissions and
+robots.txt are not built yet.
 - `decide_post`/`decide_account` take the author's `ConsentContext` and use the `_in`
   evaluations. The author tombstone follows `consent::posts_consented` (the effective
   `indexable`), not the parsed flag, so a flagless Lemmy author or follower isn't hidden.
@@ -782,6 +785,37 @@ submissions and robots.txt are not built yet.
   unfollowing removes them; `manuallyApprovesFollowers` is false; it stays neither
   `discoverable` nor `indexable`, and anything it sends itself is ignored.
 - `stats` reports `following` by state.
+
+**Admin follows (item 2), `mwmbl_social::follows`:**
+- `follow <target>`, `unfollow <target>` and `following` (JSON). A target is an actor URI, or
+  `!name@host`, `@name@host` or `name@host`, resolved by `WebFinger` (`acct:name@host`; Lemmy
+  communities answer it) with a signed `GET` through the fetcher. `follow` refuses blocked
+  domains and forgotten URIs, fetches the actor, requires an actor type (`Group`, `Person`,
+  `Service`, `Application`, `Organization`) with an inbox on its own origin, records a pending
+  row and delivers our `Follow` once, directly (not through the delivery task, which only a
+  server runs). A refused delivery drops the row; a transient failure keeps it for the re-send.
+  Ids from the CLI are `{actor}/follows/<ms>-<pid>`.
+- `unfollow` delivers `Undo{Follow}` (once; the row goes even if it fails) and removes nothing
+  from the index: a community's posts are consented by their authors and host, not by our
+  follow, and an account's own flags or opt-in decide for it.
+- Config: `follow = ["!rust@lemmy.example", …]` (env `MWMBL_SOCIAL_FOLLOW`, comma-separated;
+  each entry is parsed at load). `serve` follows any not in `following` at start-up and every
+  6 hours, resolving each handle once per process. Every follow still pending a day after it
+  was sent is re-sent (same id) and its `created_at` reset, so at most once a day; this covers
+  follow-backs and CLI follows too. Removing a target does not unfollow; on start-up each
+  followed actor that is neither configured nor an opt-in is logged with a hint to `unfollow`.
+
+**Outbox backfill, `mwmbl_social::outbox`:** when a pending follow becomes accepted (admin follows
+and opt-in follow-backs alike; a repeated `Accept` does nothing), a spawned task reads the
+actor's `outbox` (on its own origin): the collection's inline items, or `first`, then `next`,
+each page on the actor's origin, at most `outbox_backfill_pages` pages (default 5; 0 turns it
+off). From each page it takes the ids of `Note`/`Page`/`Article`/`Question` objects, `Create`s
+of them by the actor, and `Announce{Create}` (a Lemmy community relaying a post); boosts
+(`Announce` of an object or URI) are skipped. Ids must be on the actor's origin, or anywhere
+for a `Group`, as in the inbox. They are queued as kind object, reason `backfill`; it stops
+when the queue defers one (full). An outbox that is not served (401/403/404) or a page that
+fails is logged and ends the backfill. Only ids are taken; the outbox JSON is never stored or
+indexed. Not resumed after a restart.
 
 ### Stage 4: rest of FASP discovery
 

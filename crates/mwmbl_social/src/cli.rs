@@ -1,11 +1,14 @@
-//! The command line: `serve`, `ingest`, `search`, `forget`, `stats` and the registration
-//! commands `register`, `registrations` and `unregister`.
+//! The command line: `serve`, `ingest`, `search`, `forget`, `stats`, the registration
+//! commands `register`, `registrations` and `unregister`, and the follow commands `follow`,
+//! `unfollow` and `following`.
 //!
 //! One process at a time may write the indexes, enforced by the lock on `writer.lock`
 //! ([`WriterLock`]). `ingest` and `forget` write in-process when the lock is free and otherwise
 //! only record their request in SQLite for the running server to pick up. `search` and `stats`
 //! never need the lock. The registration commands only write SQLite (and `register` makes
-//! outbound HTTP), so they need no lock either.
+//! outbound HTTP), so they need no lock either. Nor do the follow commands: they write the
+//! `following` table and deliver with their own fetcher and our actor's key, and a running
+//! server's inbox reads `following` from SQLite on every delivery, so it sees the follow.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use apub::actor::server_actor_key_id;
-use apub::fetch::{Fetcher, FetcherConfig, user_agent};
+use apub::fetch::{DeliveryOutcome, Fetcher, FetcherConfig, user_agent};
 use clap::{Parser, Subcommand, ValueEnum};
 use fasp::registration::{RegistrationOutcome, register as fasp_register};
 use serde_json::{Value, json};
@@ -31,8 +34,12 @@ use crate::config::{Config, ENV_CONFIG_PATH};
 use crate::decide::Action;
 use crate::delivery::{self, DeliveryConfig};
 use crate::fasp_app::{FaspApp, MAINTAIN_EVERY};
+use crate::follows::{
+    FollowTarget, activity_id, fetch_followable, follow_activity, parse_follow_target, resolve,
+    self_link, undo_follow_activity,
+};
 use crate::http::{AppState, router};
-use crate::inbox_app::InboxApp;
+use crate::inbox_app::{FOLLOW_MAINTENANCE_EVERY, FollowSettings, InboxApp};
 use crate::keys::load_or_generate;
 use crate::metrics::{self, MetricsState};
 use crate::now_secs;
@@ -101,6 +108,19 @@ pub enum Command {
         /// The registration id shown by `registrations`.
         id: i64,
     },
+    /// Follow a community or account, so its new posts reach our inbox.
+    Follow {
+        /// An actor URI, or `!community@host`, `@user@host` or `user@host`.
+        target: String,
+    },
+    /// Stop following a community or account. What is indexed stays; its authors' own
+    /// consent decides that.
+    Unfollow {
+        /// An actor URI, or `!community@host`, `@user@host` or `user@host`.
+        target: String,
+    },
+    /// List the actors we follow, or asked to, as JSON.
+    Following,
 }
 
 #[derive(Debug, Subcommand)]
@@ -179,6 +199,9 @@ pub async fn run(command: Command, config: Config) -> anyhow::Result<()> {
             let summary = unregister(&config, id)?;
             print_json(&summary)
         }
+        Command::Follow { target } => print_json(&follow(&config, &target).await?),
+        Command::Unfollow { target } => print_json(&unfollow(&config, &target).await?),
+        Command::Following => print_json(&following(&config)?),
     }
 }
 
@@ -371,6 +394,12 @@ async fn serve_with_lock(
         handle.clone(),
         deliveries,
         config.queue_cap,
+        follow_settings(&config)?,
+    );
+    tasks.spawn(
+        inbox
+            .clone()
+            .run_follow_maintenance(FOLLOW_MAINTENANCE_EVERY, shutdown_rx.clone()),
     );
     let mut app = router(AppState {
         base_url: base_url.clone(),
@@ -420,6 +449,19 @@ async fn serve_with_lock(
     drop(handle);
     writer.finish();
     Ok(())
+}
+
+fn follow_settings(config: &Config) -> anyhow::Result<FollowSettings> {
+    let targets = config
+        .follow
+        .iter()
+        .map(|t| parse_follow_target(t))
+        .collect::<Result<_, _>>()?;
+    Ok(FollowSettings {
+        targets,
+        allow_http: config.allow_http,
+        outbox_backfill_pages: config.outbox_backfill_pages,
+    })
 }
 
 /// The HTTP client for our own calls to servers' FASP APIs and registration.
@@ -632,19 +674,6 @@ pub fn parse_target(text: &str) -> anyhow::Result<Target> {
     Ok(Target::Domain(domain))
 }
 
-/// The `self` link of a `WebFinger` document that points at an `ActivityPub` actor.
-#[must_use]
-pub fn self_link(jrd: &Value) -> Option<String> {
-    jrd.get("links")?.as_array()?.iter().find_map(|link| {
-        let is_self = link.get("rel").and_then(Value::as_str) == Some("self");
-        let kind = link.get("type").and_then(Value::as_str).unwrap_or_default();
-        let activity = kind.contains("activity+json") || kind.contains("ld+json");
-        (is_self && activity)
-            .then(|| link.get("href").and_then(Value::as_str).map(str::to_string))
-            .flatten()
-    })
-}
-
 /// Look an account up by `WebFinger`: one request, made on an administrator's say-so.
 async fn resolve_acct(config: &Config, user: &str, host: &str) -> anyhow::Result<String> {
     let scheme = if config.allow_http { "http" } else { "https" };
@@ -825,6 +854,176 @@ pub fn unregister(config: &Config, id: i64) -> anyhow::Result<Value> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// follow, unfollow, following
+
+/// What the follow commands need: our actor, a fetcher with our actor's key, and SQLite.
+struct FollowContext {
+    our_actor: String,
+    fetcher: Fetcher,
+    store: Store,
+}
+
+impl FollowContext {
+    fn open(config: &Config) -> anyhow::Result<Self> {
+        let base_url = config.require_base_url()?.to_string();
+        let key = load_or_generate(&config.keys_dir())?;
+        let fetcher = build_fetcher(config, &base_url, key)?;
+        let store = open_store(config)?;
+        seed_hosts(&fetcher, &store, now_secs())?;
+        Ok(Self {
+            our_actor: apub::actor::server_actor_url(&base_url),
+            fetcher,
+            store,
+        })
+    }
+
+    async fn resolve(&self, config: &Config, text: &str) -> anyhow::Result<String> {
+        let target = parse_follow_target(text)?;
+        let uri = resolve(&self.fetcher, config.allow_http, &target).await?;
+        if let FollowTarget::Handle { .. } = target {
+            tracing::info!(handle = %target, actor = uri, "resolved by WebFinger");
+        }
+        Ok(uri)
+    }
+
+    /// Delivers `activity` to `inbox` once, now.
+    async fn deliver(&self, inbox: &str, activity: &Value) -> anyhow::Result<DeliveryOutcome> {
+        let body = serde_json::to_vec(activity)?;
+        Ok(self.fetcher.deliver(inbox, &body).await)
+    }
+
+    fn finish(&self) {
+        if let Err(e) = persist_hosts(&self.fetcher, &self.store, now_secs()) {
+            tracing::warn!(error = %e, "failed to persist host state");
+        }
+    }
+}
+
+/// Whether a `serve` process holds the writer lock (and so receives our inbox's `Accept`s).
+fn server_running(config: &Config) -> anyhow::Result<bool> {
+    Ok(WriterLock::try_acquire(config)?.is_none())
+}
+
+/// Follows `target`: resolves it, fetches the actor (any actor type: a community or an
+/// account), records a pending `following` row and delivers our `Follow`. The `Accept` arrives
+/// at a running server's inbox, which then backfills from the actor's outbox.
+pub async fn follow(config: &Config, target: &str) -> anyhow::Result<Value> {
+    let cx = FollowContext::open(config)?;
+    let uri = cx.resolve(config, target).await?;
+    let tombstones = load_tombstones(&cx.store)?;
+    let blocked =
+        social_index::tombstones::host_of(&uri).is_none_or(|host| tombstones.domain_blocked(&host));
+    if blocked || cx.store.is_forgotten(&uri)? {
+        bail!("{uri} is on a blocked domain or was forgotten; not following it");
+    }
+    let actor = fetch_followable(&cx.fetcher, &uri).await?;
+    if let Some(row) = cx.store.following(&actor.uri)? {
+        return Ok(json!({
+            "actor": row.actor_uri, "state": row.state.as_str(), "note": "already followed",
+        }));
+    }
+    let id = activity_id(
+        &cx.our_actor,
+        "follows",
+        crate::now_millis(),
+        u64::from(std::process::id()),
+    );
+    cx.store
+        .add_following(&actor.uri, &actor.inbox, &id, now_secs())?;
+    let outcome = cx
+        .deliver(
+            &actor.inbox,
+            &follow_activity(&cx.our_actor, &id, &actor.uri),
+        )
+        .await?;
+    cx.finish();
+    let delivered = match &outcome {
+        DeliveryOutcome::Delivered { .. } => true,
+        outcome if outcome.is_transient() => false,
+        outcome => {
+            cx.store.remove_following(&actor.uri)?;
+            bail!("{} refused our Follow: {outcome:?}", actor.inbox);
+        }
+    };
+    tracing::info!(
+        actor = actor.uri,
+        group = actor.info.is_group,
+        delivered,
+        "following"
+    );
+    let mut note = if delivered {
+        "pending until the actor accepts; a running server then backfills from its outbox"
+            .to_owned()
+    } else {
+        format!("delivery failed for now ({outcome:?}); a running server re-sends it within a day")
+    };
+    if !server_running(config)? {
+        note.push_str("; no server is running, so start `serve` to receive the Accept");
+    }
+    Ok(json!({
+        "actor": actor.uri,
+        "type": if actor.info.is_group { "community" } else { "account" },
+        "state": "pending",
+        "delivered": delivered,
+        "note": note,
+    }))
+}
+
+/// Unfollows `target`: delivers `Undo{Follow}` and drops the row. Nothing indexed is removed:
+/// a community's posts are consented by their authors and their host, not by our follow, and
+/// an account's own flags (or its opt-in) decide for it.
+pub async fn unfollow(config: &Config, target: &str) -> anyhow::Result<Value> {
+    let cx = FollowContext::open(config)?;
+    let uri = cx.resolve(config, target).await?;
+    let row = cx
+        .store
+        .following(&uri)?
+        .with_context(|| format!("we don't follow {uri}"))?;
+    let undo = undo_follow_activity(&cx.our_actor, &row.follow_id, &row.actor_uri);
+    let outcome = cx.deliver(&row.inbox, &undo).await?;
+    cx.finish();
+    let delivered = matches!(outcome, DeliveryOutcome::Delivered { .. });
+    if !delivered {
+        tracing::warn!(
+            actor = row.actor_uri,
+            inbox = row.inbox,
+            ?outcome,
+            "our Undo was not delivered; unfollowing here anyway"
+        );
+    }
+    cx.store.remove_following(&row.actor_uri)?;
+    let mut report = json!({ "actor": row.actor_uri, "unfollowed": true, "delivered": delivered });
+    if cx.store.is_follow_optin(&row.actor_uri)?
+        && let Some(object) = report.as_object_mut()
+    {
+        object.insert(
+            "note".to_owned(),
+            json!(
+                "this actor follows us (an opt-in): its posts stay indexable, but no \
+                   longer reach our inbox"
+            ),
+        );
+    }
+    Ok(report)
+}
+
+/// The `following` table as JSON.
+pub fn following(config: &Config) -> anyhow::Result<Value> {
+    let store = open_store(config)?;
+    let mut out = Vec::new();
+    for row in store.list_following()? {
+        out.push(json!({
+            "actor": row.actor_uri,
+            "inbox": row.inbox,
+            "state": row.state.as_str(),
+            "sent_at": row.created_at,
+            "follows_us": store.is_follow_optin(&row.actor_uri)?,
+        }));
+    }
+    Ok(Value::Array(out))
+}
+
+// ---------------------------------------------------------------------------------------------
 // stats
 
 fn index_size<T: tinyindex::IndexItem>(path: &std::path::Path) -> anyhow::Result<Value> {
@@ -945,26 +1144,6 @@ mod tests {
     }
 
     #[test]
-    fn webfinger_self_link() {
-        let jrd = json!({"subject": "acct:a@h.example", "links": [
-            {"rel": "http://webfinger.net/rel/profile-page", "type": "text/html", "href": "https://h.example/@a"},
-            {"rel": "self", "type": "application/activity+json", "href": "https://h.example/users/a"},
-        ]});
-        assert_eq!(
-            self_link(&jrd).as_deref(),
-            Some("https://h.example/users/a")
-        );
-        let ld = json!({"links": [{"rel": "self", "type": "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"", "href": "https://h.example/u"}]});
-        assert_eq!(self_link(&ld).as_deref(), Some("https://h.example/u"));
-        assert_eq!(
-            self_link(&json!({"links": [{"rel": "self", "type": "text/html", "href": "x"}]})),
-            None
-        );
-        assert_eq!(self_link(&json!({})), None);
-        assert_eq!(self_link(&json!({"links": "no"})), None);
-    }
-
-    #[test]
     fn action_summaries_carry_no_content() {
         let action = Action::RemovePost {
             uri: "https://h.example/s/1".into(),
@@ -1013,6 +1192,24 @@ mod tests {
             Some(Command::Registrations)
         ));
         assert!(Cli::try_parse_from(["mwmbl-social", "unregister", "x"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["mwmbl-social", "follow", "!rust@l.example"])
+                .ok()
+                .map(|c| c.command),
+            Some(Command::Follow { target }) if target == "!rust@l.example"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["mwmbl-social", "unfollow", "https://l.example/c/rust"])
+                .ok()
+                .map(|c| c.command),
+            Some(Command::Unfollow { .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["mwmbl-social", "following"])
+                .ok()
+                .map(|c| c.command),
+            Some(Command::Following)
+        ));
     }
 
     #[test]

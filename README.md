@@ -84,6 +84,23 @@ set from the environment as `MWMBL_SOCIAL_<FIELD>`, for example `MWMBL_SOCIAL_BA
 | `fetch_concurrency` | 8 | |
 | `revalidate_interval_per_host_ms` | 1000 | Revalidation fetches to one host start at most once per this interval; the rest are rescheduled. 0 turns it off. Announcements and backfill are not limited by it |
 | `metrics` | `false` | Serve Prometheus text at `/metrics`. It is public, so firewall or proxy it |
+| `follow` | `[]` | Communities or accounts to follow, e.g. `["!rust@lemmy.example"]`; env: comma-separated |
+| `outbox_backfill_pages` | 5 | Outbox pages read when a follow is accepted; 0 turns it off |
+
+## Following communities
+
+Lemmy doesn't speak FASP, so its communities are followed instead. Follow only communities
+whose instance admins agreed to be indexed.
+
+- `mwmbl-social follow '!rust@lemmy.example'` follows a community (or `@user@host`, or an actor
+  URI). Its new posts then reach our inbox, and once it accepts, its recent posts are read from
+  its outbox (up to `outbox_backfill_pages` pages).
+- `mwmbl-social unfollow '!rust@lemmy.example'` stops following. What is indexed stays.
+- `mwmbl-social following` lists what we follow and whether it accepted.
+- Or list them under `follow` in the config: `serve` follows any new ones at start-up and every
+  6 hours. Removing one from the list does not unfollow it.
+
+The server must be running to receive the community's acceptance.
 
 ## Removing content
 

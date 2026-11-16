@@ -14,7 +14,7 @@
 //! only yield the [`Effect`]s of [`crate::activities`], and objects are fetched from their origin
 //! through the fetch queue like everything else.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
@@ -34,13 +34,19 @@ use axum::routing::post;
 use serde_json::{Value, json};
 use social_index::Tombstones;
 use social_index::tombstones::host_of;
-use store::{FetchReason, NewFetch, Store};
+use store::{FetchKind, FetchReason, FollowState, NewFetch, Store};
+use tokio::sync::watch;
 
 use crate::activities::{
     Effect, Sender, account_deleted, activity_actor, handle, self_delete_with_gone_key,
 };
 use crate::decide::Action;
 use crate::delivery::Deliveries;
+use crate::follows::{
+    ActorInfo, FollowTarget, activity_id, actor_info, fetch_followable, follow_activity, resolve,
+    undo_follow_activity,
+};
+use crate::outbox;
 use crate::writer::WriterHandle;
 use crate::{now_millis, now_secs};
 
@@ -52,6 +58,21 @@ pub const KEY_TTL: Duration = Duration::from_secs(3600);
 const CACHE_CAPACITY: usize = 10_000;
 
 const AS_CONTEXT: &str = "https://www.w3.org/ns/activitystreams";
+/// How often configured follows are checked, and stale pending follows re-sent.
+pub const FOLLOW_MAINTENANCE_EVERY: Duration = Duration::from_secs(6 * 3600);
+/// A follow still pending after this long is sent again (once per this long).
+pub const RESEND_PENDING_AFTER_SECS: i64 = 86_400;
+
+/// The follows an admin configured, and how outbox backfill runs.
+#[derive(Debug, Clone, Default)]
+pub struct FollowSettings {
+    /// The `follow` config option, parsed.
+    pub targets: Vec<FollowTarget>,
+    /// `WebFinger` over `http://` (tests only).
+    pub allow_http: bool,
+    /// Outbox pages read when a follow is accepted (0: none).
+    pub outbox_backfill_pages: usize,
+}
 
 /// A small in-memory map whose entries expire.
 struct Cache<T> {
@@ -91,29 +112,6 @@ impl<T: Clone> Cache<T> {
     }
 }
 
-/// What we know about an actor beyond its URI.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ActorInfo {
-    is_group: bool,
-    /// The actor's own inbox, if it is on the actor's origin.
-    inbox: Option<String>,
-}
-
-fn actor_info(actor: &Value) -> ActorInfo {
-    let id = actor.get("id").and_then(Value::as_str).unwrap_or_default();
-    let is_group = match actor.get("type") {
-        Some(Value::String(t)) => t == "Group",
-        Some(Value::Array(ts)) => ts.iter().any(|t| t.as_str() == Some("Group")),
-        _ => false,
-    };
-    let inbox = actor
-        .get("inbox")
-        .and_then(Value::as_str)
-        .filter(|inbox| same_origin(inbox, id))
-        .map(str::to_owned);
-    ActorInfo { is_group, inbox }
-}
-
 /// Why a delivery's signature was not accepted. Messages carry URIs, never content.
 #[derive(Debug, thiserror::Error)]
 enum VerifyError {
@@ -142,6 +140,7 @@ struct Inner {
     tombstones: Arc<RwLock<Tombstones>>,
     deliveries: Deliveries,
     queue_cap: usize,
+    follows: FollowSettings,
     keys: Mutex<Cache<RsaVerifyingKey>>,
     actors: Mutex<Cache<ActorInfo>>,
     sequence: AtomicU64,
@@ -183,6 +182,7 @@ impl InboxApp {
         writer: WriterHandle,
         deliveries: Deliveries,
         queue_cap: usize,
+        follows: FollowSettings,
     ) -> Self {
         let tombstones = writer.tombstones();
         Self {
@@ -195,6 +195,7 @@ impl InboxApp {
                 tombstones,
                 deliveries,
                 queue_cap,
+                follows,
                 keys: Mutex::new(Cache::new()),
                 actors: Mutex::new(Cache::new()),
                 sequence: AtomicU64::new(0),
@@ -350,7 +351,7 @@ impl InboxApp {
     /// A fresh id under our actor for an activity we send.
     fn new_id(&self, kind: &str) -> String {
         let n = self.inner.sequence.fetch_add(1, Ordering::Relaxed);
-        format!("{}/{kind}/{}-{n}", self.inner.our_actor, now_millis())
+        activity_id(&self.inner.our_actor, kind, now_millis(), n)
     }
 
     /// Handles a verified activity: works out its effects and applies them in order.
@@ -427,8 +428,18 @@ impl InboxApp {
             Effect::FollowBack { actor_uri } => self.follow_back(&actor_uri).await,
             Effect::Unfollow { actor_uri } => self.unfollow(&actor_uri),
             Effect::FollowAccepted { actor_uri } => {
-                tracing::info!(actor = actor_uri, "our follow was accepted");
-                Self::log_store(self.store(|s| s.accept_following(&actor_uri)));
+                match self.store(|s| s.accept_following(&actor_uri)) {
+                    Ok(true) => {
+                        tracing::info!(actor = actor_uri, "our follow was accepted");
+                        // Off the inbox's path: an outbox can take a while to read.
+                        let app = self.clone();
+                        tokio::spawn(async move { app.backfill_outbox(&actor_uri).await });
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::error!(actor = actor_uri, error = %e, "failed to accept a follow");
+                    }
+                }
             }
             Effect::DropFollowing { actor_uri } => {
                 Self::log_store(self.store(|s| s.remove_following(&actor_uri)));
@@ -504,21 +515,26 @@ impl InboxApp {
         let Some(inbox) = self.inbox_of(actor).await else {
             return;
         };
+        if self.record_and_send_follow(actor, &inbox) {
+            tracing::info!(actor, "following back");
+        }
+    }
+
+    /// Records a pending follow of `actor` and delivers our `Follow`. Returns whether it was
+    /// new.
+    fn record_and_send_follow(&self, actor: &str, inbox: &str) -> bool {
         let id = self.new_id("follows");
-        match self.store(|s| s.add_following(actor, &inbox, &id, now_secs())) {
+        match self.store(|s| s.add_following(actor, inbox, &id, now_secs())) {
             Ok(true) => {
-                tracing::info!(actor, "following back");
-                let follow = json!({
-                    "@context": AS_CONTEXT,
-                    "id": id,
-                    "type": "Follow",
-                    "actor": self.inner.our_actor,
-                    "object": actor,
-                });
-                self.inner.deliveries.send(&inbox, &follow);
+                let follow = follow_activity(&self.inner.our_actor, &id, actor);
+                self.inner.deliveries.send(inbox, &follow);
+                true
             }
-            Ok(false) => {}
-            Err(e) => tracing::error!(actor, error = %e, "failed to record following"),
+            Ok(false) => false,
+            Err(e) => {
+                tracing::error!(actor, error = %e, "failed to record following");
+                false
+            }
         }
     }
 
@@ -532,22 +548,176 @@ impl InboxApp {
                 return;
             }
         };
-        let our_actor = &self.inner.our_actor;
-        let undo = json!({
-            "@context": AS_CONTEXT,
-            "id": format!("{}/undo", row.follow_id),
-            "type": "Undo",
-            "actor": our_actor,
-            "object": {
-                "id": row.follow_id,
-                "type": "Follow",
-                "actor": our_actor,
-                "object": actor,
-            },
-        });
+        let undo = undo_follow_activity(&self.inner.our_actor, &row.follow_id, actor);
         tracing::info!(actor, "unfollowing");
         self.inner.deliveries.send(&row.inbox, &undo);
         Self::log_store(self.store(|s| s.remove_following(actor)));
+    }
+
+    /// Reads `actor`'s outbox and queues its posts for backfill (see [`crate::outbox`]).
+    pub async fn backfill_outbox(&self, actor: &str) {
+        let pages = self.inner.follows.outbox_backfill_pages;
+        if pages == 0 {
+            return;
+        }
+        let Some(info) = self.actor_info(actor).await else {
+            return;
+        };
+        let Some(outbox_uri) = info.outbox else {
+            tracing::info!(actor, "no outbox on the actor's origin; no backfill");
+            return;
+        };
+        let cap = self.inner.queue_cap;
+        let report = outbox::backfill(
+            &self.inner.fetcher,
+            actor,
+            info.is_group,
+            &outbox_uri,
+            pages,
+            |uri| {
+                let item = NewFetch {
+                    uri: uri.to_owned(),
+                    kind: FetchKind::Object,
+                    reason: FetchReason::Backfill,
+                    record: None,
+                    not_before: now_secs(),
+                };
+                self.store(|s| s.enqueue(&item, now_secs(), cap))
+            },
+        )
+        .await;
+        match &report.stopped {
+            None => tracing::info!(
+                actor,
+                pages = report.pages,
+                queued = report.queued,
+                "outbox backfill done"
+            ),
+            Some(reason) => tracing::info!(
+                actor,
+                pages = report.pages,
+                queued = report.queued,
+                reason,
+                "outbox backfill stopped"
+            ),
+        }
+    }
+
+    /// Follows each configured target we don't follow yet, and re-sends follows pending for
+    /// more than [`RESEND_PENDING_AFTER_SECS`]. `resolved` remembers what handles resolved to,
+    /// so `WebFinger` is asked once per process. On the first run (`hint`), followed actors
+    /// that are neither configured nor follow opt-ins are logged, since dropping a target from
+    /// the config doesn't unfollow it.
+    pub async fn maintain_follows(&self, resolved: &mut HashMap<String, String>, hint: bool) {
+        let settings = &self.inner.follows;
+        let mut configured = HashSet::new();
+        for target in &settings.targets {
+            let key = target.to_string();
+            let uri = if let Some(uri) = resolved.get(&key) {
+                uri.clone()
+            } else {
+                match resolve(&self.inner.fetcher, settings.allow_http, target).await {
+                    Ok(uri) => {
+                        resolved.insert(key, uri.clone());
+                        uri
+                    }
+                    Err(e) => {
+                        tracing::warn!(target = %target, error = %e, "cannot follow a configured target");
+                        continue;
+                    }
+                }
+            };
+            configured.insert(uri.clone());
+            self.follow_configured(&uri).await;
+        }
+        let rows = match self.store(Store::list_following) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to list following");
+                return;
+            }
+        };
+        let now = now_secs();
+        for row in &rows {
+            if row.state == FollowState::Pending
+                && row.created_at <= now.saturating_sub(RESEND_PENDING_AFTER_SECS)
+            {
+                tracing::info!(actor = row.actor_uri, "re-sending a pending follow");
+                let follow = follow_activity(&self.inner.our_actor, &row.follow_id, &row.actor_uri);
+                self.inner.deliveries.send(&row.inbox, &follow);
+                Self::log_store(self.store(|s| s.following_resent(&row.actor_uri, now)));
+            }
+            if hint && !settings.targets.is_empty() && !configured.contains(&row.actor_uri) {
+                let optin = self.store(|s| s.is_follow_optin(&row.actor_uri));
+                if matches!(optin, Ok(false)) {
+                    tracing::info!(
+                        actor = row.actor_uri,
+                        "followed but not in the `follow` config; `mwmbl-social unfollow` stops it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Follows the configured actor `uri`, unless we do already.
+    async fn follow_configured(&self, uri: &str) {
+        match self.store(|s| s.following(uri)) {
+            Ok(None) => {}
+            Ok(Some(_)) => return,
+            Err(e) => {
+                tracing::error!(actor = uri, error = %e, "failed to read following");
+                return;
+            }
+        }
+        if self.ignored(uri) {
+            tracing::warn!(
+                actor = uri,
+                "a configured follow is blocked or forgotten; skipping"
+            );
+            return;
+        }
+        let actor = match fetch_followable(&self.inner.fetcher, uri).await {
+            Ok(actor) => actor,
+            Err(e) => {
+                tracing::warn!(actor = uri, error = %e, "cannot follow a configured target");
+                return;
+            }
+        };
+        self.inner
+            .actors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(&actor.uri, actor.info.clone());
+        if self.record_and_send_follow(&actor.uri, &actor.inbox) {
+            tracing::info!(
+                actor = actor.uri,
+                group = actor.info.is_group,
+                "following (configured)"
+            );
+        }
+    }
+
+    /// Runs [`InboxApp::maintain_follows`] now and every `every` until `shutdown`.
+    pub async fn run_follow_maintenance(
+        self,
+        every: Duration,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
+        let mut resolved = HashMap::new();
+        let mut interval = tokio::time::interval(every);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut first = true;
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown.changed() => {}
+            }
+            if *shutdown.borrow() {
+                break;
+            }
+            self.maintain_follows(&mut resolved, first).await;
+            first = false;
+        }
     }
 
     /// The inbox to deliver to `actor` at, if it is on the actor's origin.
@@ -623,29 +793,6 @@ async fn receive(State(app): State<InboxApp>, request: Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn actor_infos() {
-        let actor = json!({"id": "https://l.example/c/g", "type": "Group",
-            "inbox": "https://l.example/c/g/inbox"});
-        assert_eq!(
-            actor_info(&actor),
-            ActorInfo {
-                is_group: true,
-                inbox: Some("https://l.example/c/g/inbox".into())
-            }
-        );
-        // An inbox elsewhere is not used.
-        let actor = json!({"id": "https://a.example/u/x", "type": ["Person"],
-            "inbox": "https://victim.example/inbox"});
-        assert_eq!(
-            actor_info(&actor),
-            ActorInfo {
-                is_group: false,
-                inbox: None
-            }
-        );
-    }
 
     #[test]
     fn media_types() {
