@@ -518,7 +518,23 @@ removes it.
    events are dropped; at most 1000 `http(s)` URIs are taken per request; a malformed body
    gets 422.
 6. Tune the sweep's revalidation against real servers: spread the fetches and respect per-host
-   budgets, so a weekly pass doesn't overload a big host.
+   budgets, so a weekly pass doesn't overload a big host. (Done: `mwmbl_social::pacing`.)
+   - The worker reads up to 4 due candidates per free slot (at most 256) and passes over,
+     leaving queued, any whose host already has the fetcher's `per_host_concurrency` in
+     flight, so one host's items never fill the worker's slots waiting on the fetcher. Host
+     is `apub::fetch::uri_host_key` (lowercase `host[:port]`, as the fetcher keys hosts);
+     a URI without one is started as before.
+   - Revalidations to one host start at most once per `revalidate_interval_per_host_ms`
+     (default 1000). The worker keeps an in-memory `host -> next start, next free slot` map.
+     A due revalidation whose host is not ready is left queued if the slot is under a second
+     away (one per host per pass: `not_before` is whole seconds), and otherwise moved with
+     `Store::defer` to the next free slot, which then advances one interval. `defer` does not
+     touch `attempts` or `last_error`, and only moves rows still queued as revalidations.
+     So a host's backlog is laid out in the queue, not polled, and holds no worker slot.
+     Announcements and backfill are not budgeted. Hosts whose slots have all passed are
+     dropped from the map once it tracks over 10 000. Deferrals are counted in
+     `mwmbl_social_revalidations_deferred_total` and logged at debug with the host.
+   - `Worker::drain` (tests, one-off runs) is not paced.
 7. Accounts: when an account turns off `discoverable` or `indexable`, add an author tombstone
    (see Deletion).
 8. Observability: tracing, a `/metrics` endpoint (Prometheus) for queue depth, fetch errors,
@@ -555,10 +571,12 @@ removes it.
   `metrics` config is true. It is unauthenticated, so firewall it or proxy it to an internal
   address. It reports queue depth (total and by reason), tombstones by kind, domain blocks,
   registrations by status, enabled capabilities, fetch outcomes (`found`, `gone`, `refused`,
-  `rate_limited`, `backoff`, `error`; counters in the worker) and index sizes. Per-host status
+  `rate_limited`, `backoff`, `error`; counters in the worker), revalidations deferred by the
+  per-host budget, and index sizes. Per-host status
   is not in it yet.
 - New config (each with an env override): `privacy_policy_language` (default `en`),
-  `fediverse_account`, `backfill_max_count` (default 100), `metrics` (default false).
+  `fediverse_account`, `backfill_max_count` (default 100), `metrics` (default false),
+  `revalidate_interval_per_host_ms` (default 1000; item 6).
 - Account opt-outs (item 7) go through `decide`'s author tombstones. A fetched actor document
   now also replaces the worker's cached copy, so a post processed after an opt-out announcement
   cannot be judged against a stale `indexable: true` (the cache lives for an hour).
@@ -572,8 +590,9 @@ registration and approval (Mastodon verified our signed `provider_info`), `data_
 activation (2 subscriptions, 2 backfills), backfill indexing alice's public post but not her
 unlisted one nor non-indexable bob's posts. A new post appears; an edit applies after the
 4-minute delay; a delete removes it and leaves a tombstone; alice turning off `indexable`
-removes her posts and keeps her account. Items 6 (tuning revalidation against real servers'
-per-host budgets) remains. The hosted sign-up page was dropped: Mwmbl handles it.
+removes her posts and keeps her account. Item 6 is done: the worker passes over hosts at
+their concurrency limit and lays revalidations out one per host per interval (1 s default). The
+hosted sign-up page was dropped: Mwmbl handles it.
 
 ### Stage 2: FASP `account_search`
 

@@ -22,6 +22,7 @@ pub mod fasp_app;
 pub mod http;
 pub mod keys;
 pub mod metrics;
+pub mod pacing;
 pub mod records;
 pub mod search;
 pub mod sweep;
@@ -35,5 +36,15 @@ pub fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .unwrap_or(0)
+}
+
+/// The current time in Unix milliseconds.
+#[must_use]
+pub fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
         .unwrap_or(0)
 }

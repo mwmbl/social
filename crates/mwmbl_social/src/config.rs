@@ -64,6 +64,10 @@ pub struct Config {
     pub sweep_period_secs: u64,
     /// A stored record not checked for this long is revalidated by the sweep.
     pub revalidate_after_secs: u64,
+    /// Revalidation fetches to one host start at most once per this many milliseconds; the
+    /// rest are rescheduled. 0 turns the budget off. Announcements and backfill are not
+    /// budgeted.
+    pub revalidate_interval_per_host_ms: u64,
     /// A fetch that fails transiently this many times is given up on.
     pub max_transient_attempts: i64,
     /// How many objects each FASP backfill request asks a server for, per category.
@@ -97,6 +101,7 @@ impl Default for Config {
             fetch_concurrency: 8,
             sweep_period_secs: 6 * 86_400,
             revalidate_after_secs: 6 * 86_400,
+            revalidate_interval_per_host_ms: 1000,
             max_transient_attempts: 10,
             backfill_max_count: 100,
             metrics: false,
@@ -206,6 +211,7 @@ impl Config {
             fetch_concurrency,
             sweep_period_secs,
             revalidate_after_secs,
+            revalidate_interval_per_host_ms,
             max_transient_attempts,
             backfill_max_count,
             metrics,
@@ -335,6 +341,7 @@ mod tests {
         assert_eq!(config.sweep_period_secs, 518_400);
         assert_eq!(config.revalidate_after_secs, 518_400);
         assert_eq!(config.max_transient_attempts, 10);
+        assert_eq!(config.revalidate_interval_per_host_ms, 1000);
         assert!(!config.allow_http);
         assert_eq!(config.privacy_policy_language, "en");
         assert_eq!(config.fediverse_account, None);
@@ -416,8 +423,10 @@ mod tests {
                 ("MWMBL_SOCIAL_FEDIVERSE_ACCOUNT", "@me@x.example"),
                 ("MWMBL_SOCIAL_BACKFILL_MAX_COUNT", "7"),
                 ("MWMBL_SOCIAL_METRICS", "true"),
+                ("MWMBL_SOCIAL_REVALIDATE_INTERVAL_PER_HOST_MS", "250"),
             ]),
         )?;
+        assert_eq!(config.revalidate_interval_per_host_ms, 250);
         assert_eq!(config.privacy_policy_language, "fr");
         assert_eq!(config.fediverse_account.as_deref(), Some("@me@x.example"));
         assert_eq!(config.backfill_max_count, 7);

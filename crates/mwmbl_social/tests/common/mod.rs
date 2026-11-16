@@ -231,6 +231,16 @@ impl TestEnv {
     }
 
     pub async fn with_attempts(max_transient_attempts: i64) -> Self {
+        Self::with_worker(WorkerConfig {
+            fetch_concurrency: 4,
+            max_transient_attempts,
+            tick: Duration::from_millis(10),
+            revalidate_interval_per_host: Duration::ZERO,
+        })
+        .await
+    }
+
+    pub async fn with_worker(worker_config: WorkerConfig) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = test_config(&dir);
         let writer = Writer::start(&config).unwrap();
@@ -245,11 +255,7 @@ impl TestEnv {
         let worker = Arc::new(Worker::new(
             Arc::new(Fetcher::new(fetcher).unwrap()),
             handle.clone(),
-            WorkerConfig {
-                fetch_concurrency: 4,
-                max_transient_attempts,
-                tick: Duration::from_millis(10),
-            },
+            worker_config,
         ));
         let store = Store::open(&config.store_path()).unwrap();
         let fake = FakeHost::start().await;

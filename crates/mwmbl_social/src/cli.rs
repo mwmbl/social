@@ -200,6 +200,7 @@ fn worker_config(config: &Config) -> WorkerConfig {
         fetch_concurrency: config.fetch_concurrency,
         max_transient_attempts: config.max_transient_attempts,
         tick: WORKER_TICK,
+        revalidate_interval_per_host: Duration::from_millis(config.revalidate_interval_per_host_ms),
     }
 }
 

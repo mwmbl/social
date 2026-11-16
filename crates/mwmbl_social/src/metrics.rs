@@ -34,6 +34,8 @@ pub struct Snapshot {
     /// Registrations with each capability enabled.
     pub capabilities_enabled: BTreeMap<String, usize>,
     pub fetch_outcomes: Vec<(&'static str, u64)>,
+    /// Revalidations moved later to keep within a host's budget.
+    pub revalidations_deferred: u64,
     /// `(index name, pages, page size in bytes)`.
     pub indexes: Vec<(&'static str, usize, usize)>,
 }
@@ -90,6 +92,7 @@ pub fn store_snapshot(store: &Store) -> Result<Snapshot, StoreError> {
         registrations_by_status,
         capabilities_enabled,
         fetch_outcomes: Vec::new(),
+        revalidations_deferred: 0,
         indexes: Vec::new(),
     })
 }
@@ -177,6 +180,12 @@ pub fn render(snapshot: &Snapshot) -> String {
         Some("capability"),
         &snapshot.capabilities_enabled,
     );
+    render_process(out, snapshot);
+    std::mem::take(out)
+}
+
+/// The process counters and index sizes: what the scrape adds to the store snapshot.
+fn render_process(out: &mut String, snapshot: &Snapshot) {
     series(
         out,
         (
@@ -186,6 +195,16 @@ pub fn render(snapshot: &Snapshot) -> String {
         ),
         Some("outcome"),
         snapshot.fetch_outcomes.iter().copied(),
+    );
+    series(
+        out,
+        (
+            "mwmbl_social_revalidations_deferred_total",
+            "counter",
+            "Revalidations rescheduled to keep within a host's budget since the process started.",
+        ),
+        None,
+        [("", snapshot.revalidations_deferred)],
     );
     series(
         out,
@@ -213,7 +232,6 @@ pub fn render(snapshot: &Snapshot) -> String {
             .iter()
             .map(|&(name, pages, page_size)| (name, pages.saturating_mul(page_size))),
     );
-    std::mem::take(out)
 }
 
 /// What the `/metrics` handler reads. It has its own SQLite connection.
@@ -231,6 +249,7 @@ impl MetricsState {
             store_snapshot(&store)?
         };
         snapshot.fetch_outcomes = self.counters.snapshot();
+        snapshot.revalidations_deferred = self.counters.revalidations_deferred();
         snapshot.indexes = vec![
             (
                 "posts",
@@ -300,6 +319,7 @@ mod tests {
             registrations_by_status: [("active".to_string(), 1)].into(),
             capabilities_enabled: [("data_sharing".to_string(), 1)].into(),
             fetch_outcomes: vec![("found", 9), ("gone", 0)],
+            revalidations_deferred: 7,
             indexes: vec![("posts", 64, 4096)],
         };
         let text = render(&snapshot);
@@ -316,6 +336,8 @@ mod tests {
             "# TYPE mwmbl_social_fetch_outcomes_total counter",
             "mwmbl_social_fetch_outcomes_total{outcome=\"found\"} 9",
             "mwmbl_social_fetch_outcomes_total{outcome=\"gone\"} 0",
+            "# TYPE mwmbl_social_revalidations_deferred_total counter",
+            "mwmbl_social_revalidations_deferred_total 7",
             "mwmbl_social_index_pages{index=\"posts\"} 64",
             "mwmbl_social_index_size_bytes{index=\"posts\"} 262144",
         ] {

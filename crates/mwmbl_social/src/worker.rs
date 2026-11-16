@@ -22,8 +22,9 @@ use url::Url;
 use crate::decide::{
     Action, Carried, Fetched, author_of, decide_account, decide_post, looks_like_post,
 };
-use crate::now_secs;
+use crate::pacing::{Pacer, Plan, Running, ToDefer, candidate_limit, plan};
 use crate::writer::{WriterHandle, host_blocked};
+use crate::{now_millis, now_secs};
 
 /// The longest an item waits after a transient failure.
 const MAX_RETRY_SECS: i64 = 6 * 3600;
@@ -197,6 +198,8 @@ pub struct FetchCounters {
     rate_limited: AtomicU64,
     backoff: AtomicU64,
     error: AtomicU64,
+    /// Revalidations moved later to keep within a host's budget. Not fetches.
+    revalidations_deferred: AtomicU64,
 }
 
 impl FetchCounters {
@@ -210,6 +213,16 @@ impl FetchCounters {
             FetchOutcome::Error(_) => &self.error,
         };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_deferred(&self) {
+        self.revalidations_deferred.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many revalidations were moved later to keep within a host's budget.
+    #[must_use]
+    pub fn revalidations_deferred(&self) -> u64 {
+        self.revalidations_deferred.load(Ordering::Relaxed)
     }
 
     /// `(outcome name, count)` for every outcome, in a fixed order.
@@ -235,6 +248,9 @@ pub struct WorkerConfig {
     pub max_transient_attempts: i64,
     /// How long the loop waits when there is nothing to start.
     pub tick: Duration,
+    /// Revalidations to one host start at most once per this interval (zero: no budget). See
+    /// [`crate::pacing`].
+    pub revalidate_interval_per_host: Duration,
 }
 
 /// A transient failure to retry.
@@ -279,35 +295,58 @@ impl std::fmt::Debug for Worker {
     }
 }
 
-/// The URIs being processed, so none is started twice.
+/// The URIs being processed, so none is started twice, and how many per host.
 #[derive(Debug, Default, Clone)]
-struct InFlight(Arc<Mutex<HashSet<String>>>);
+struct InFlight(Arc<Mutex<InFlightState>>);
+
+#[derive(Debug, Default, Clone)]
+struct InFlightState {
+    uris: HashSet<String>,
+    hosts: HashMap<String, usize>,
+}
 
 struct Claim {
-    set: Arc<Mutex<HashSet<String>>>,
+    state: Arc<Mutex<InFlightState>>,
     uri: String,
+    host: Option<String>,
 }
 
 impl Drop for Claim {
     fn drop(&mut self) {
-        self.set
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.uri);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.uris.remove(&self.uri);
+        if let Some(host) = &self.host
+            && let Some(count) = state.hosts.get_mut(host)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                state.hosts.remove(host);
+            }
+        }
     }
 }
 
 impl InFlight {
-    fn claim(&self, uri: &str) -> Option<Claim> {
-        let mut set = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        set.insert(uri.to_string()).then(|| Claim {
-            set: Arc::clone(&self.0),
+    fn claim(&self, uri: &str, host: Option<&str>) -> Option<Claim> {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.uris.insert(uri.to_string()) {
+            return None;
+        }
+        if let Some(host) = host {
+            *state.hosts.entry(host.to_string()).or_default() += 1;
+        }
+        Some(Claim {
+            state: Arc::clone(&self.0),
             uri: uri.to_string(),
+            host: host.map(str::to_string),
         })
     }
 
-    fn len(&self) -> usize {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).len()
+    fn snapshot(&self) -> InFlightState {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -571,7 +610,8 @@ impl Worker {
     }
 
     /// Process everything due, repeatedly, until nothing is. Items rescheduled into the future
-    /// stay queued. Returns how many items were processed.
+    /// stay queued. Returns how many items were processed. Unpaced: for tests and one-off
+    /// runs, not the server loop ([`Worker::run`]).
     pub async fn drain(self: &Arc<Self>, store: &mut Store) -> Result<usize, StoreError> {
         let mut total = 0;
         loop {
@@ -600,10 +640,14 @@ impl Worker {
     }
 
     /// Run until `shutdown` is signalled: start due items as capacity frees up, at most
-    /// `fetch_concurrency` at once and never one URI twice.
+    /// `fetch_concurrency` at once and never one URI twice. Items for a host that already has
+    /// the fetcher's per-host concurrency in flight are passed over, and revalidations are
+    /// held to each host's budget ([`crate::pacing`]).
     pub async fn run(self: Arc<Self>, store: Store, mut shutdown: watch::Receiver<bool>) {
         let permits = Arc::new(Semaphore::new(self.config.fetch_concurrency));
         let in_flight = InFlight::default();
+        let mut pacer = Pacer::new(self.config.revalidate_interval_per_host);
+        let per_host = self.fetcher.per_host_concurrency();
         let mut tasks: JoinSet<(QueuedFetch, Processed, Claim)> = JoinSet::new();
         loop {
             if *shutdown.borrow() {
@@ -614,16 +658,35 @@ impl Worker {
             }
             let free = permits.available_permits();
             if free > 0 {
-                match store.next_due(now_secs(), free + in_flight.len()) {
+                let running = in_flight.snapshot();
+                match store.next_due(now_secs(), candidate_limit(free, running.uris.len())) {
                     Ok(items) => {
-                        for item in items {
-                            let Some(claim) = in_flight.claim(&item.uri) else {
+                        let now_ms = now_millis();
+                        pacer.begin_pass(now_ms);
+                        let Plan { start, defer } = plan(
+                            items,
+                            Running {
+                                uris: &running.uris,
+                                hosts: &running.hosts,
+                                free,
+                                per_host,
+                            },
+                            &mut pacer,
+                            now_ms,
+                        );
+                        for deferral in defer {
+                            self.defer(&store, &deferral);
+                        }
+                        for next in start {
+                            let Some(claim) = in_flight.claim(&next.item.uri, next.host.as_deref())
+                            else {
                                 continue;
                             };
                             let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
                                 break;
                             };
                             let worker = Arc::clone(&self);
+                            let item = next.item;
                             tasks.spawn(async move {
                                 let processed = worker.process(&item, now_secs()).await;
                                 drop(permit);
@@ -650,6 +713,26 @@ impl Worker {
             self.reap(&store, done);
         }
         tracing::debug!("fetch worker stopped");
+    }
+
+    /// Move a revalidation to its host's next free slot. Not a failure: attempts and the last
+    /// error are left as they are.
+    fn defer(&self, store: &Store, deferral: &ToDefer) {
+        let uri = deferral.item.uri.as_str();
+        match store.defer(uri, deferral.item.reason, deferral.not_before) {
+            Ok(true) => {
+                self.counters.record_deferred();
+                tracing::debug!(
+                    uri,
+                    host = deferral.host,
+                    not_before = deferral.not_before,
+                    "revalidation deferred to keep within the host's budget"
+                );
+            }
+            // Upgraded or finished since it was read: nothing to move.
+            Ok(false) => {}
+            Err(e) => tracing::error!(uri, error = %e, "failed to defer a revalidation"),
+        }
     }
 
     fn reap(
@@ -899,13 +982,21 @@ mod tests {
     #[test]
     fn in_flight_claims_are_exclusive_and_released_on_drop() {
         let in_flight = InFlight::default();
-        let claim = in_flight.claim("u");
+        let claim = in_flight.claim("u", Some("h.example"));
         assert!(claim.is_some());
-        assert!(in_flight.claim("u").is_none());
-        assert!(in_flight.claim("v").is_some());
-        assert_eq!(in_flight.len(), 1);
+        assert!(in_flight.claim("u", Some("h.example")).is_none());
+        assert!(in_flight.claim("v", None).is_some());
+        assert_eq!(in_flight.snapshot().uris.len(), 1);
+        let other = in_flight.claim("w", Some("h.example"));
+        assert_eq!(in_flight.snapshot().hosts.get("h.example"), Some(&2));
         drop(claim);
-        assert!(in_flight.claim("u").is_some());
+        assert_eq!(in_flight.snapshot().hosts.get("h.example"), Some(&1));
+        drop(other);
+        assert!(
+            in_flight.snapshot().hosts.is_empty(),
+            "no empty host entries"
+        );
+        assert!(in_flight.claim("u", None).is_some());
     }
 
     #[test]

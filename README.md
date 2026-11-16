@@ -82,6 +82,7 @@ set from the environment as `MWMBL_SOCIAL_<FIELD>`, for example `MWMBL_SOCIAL_BA
 | `posts_pages`, `accounts_pages` | 65536, 16384 | Index size in 4 KiB pages; full pages drop their lowest-scored items |
 | `sweep_period_secs` | 6 days | One full revalidation pass over each index |
 | `fetch_concurrency` | 8 | |
+| `revalidate_interval_per_host_ms` | 1000 | Revalidation fetches to one host start at most once per this interval; the rest are rescheduled. 0 turns it off. Announcements and backfill are not limited by it |
 | `metrics` | `false` | Serve Prometheus text at `/metrics`. It is public, so firewall or proxy it |
 
 ## Removing content
