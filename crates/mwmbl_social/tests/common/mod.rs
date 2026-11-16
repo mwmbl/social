@@ -38,6 +38,7 @@ pub fn test_key() -> RsaSigningKey {
 #[derive(Default)]
 struct FakeState {
     docs: Mutex<HashMap<String, Value>>,
+    texts: Mutex<HashMap<String, String>>,
     gone: Mutex<HashSet<String>>,
     failing: Mutex<HashSet<String>>,
     hits: Mutex<HashMap<String, usize>>,
@@ -52,6 +53,15 @@ pub struct FakeHost {
 async fn serve_doc(State(state): State<Arc<FakeState>>, uri: Uri) -> Response<Body> {
     let path = uri.path().to_string();
     *state.hits.lock().unwrap().entry(path.clone()).or_default() += 1;
+    if let Some(text) = state.texts.lock().unwrap().get(&path).cloned()
+        && !state.failing.lock().unwrap().contains(&path)
+    {
+        return Response::builder()
+            .status(200)
+            .header("content-type", "text/plain")
+            .body(Body::from(text))
+            .unwrap();
+    }
     let status = if state.failing.lock().unwrap().contains(&path) {
         500
     } else if state.gone.lock().unwrap().contains(&path) {
@@ -170,6 +180,15 @@ impl FakeHost {
             .lock()
             .unwrap()
             .insert(path.to_string(), doc);
+    }
+
+    /// Serve `text` as `text/plain` at `path` (a robots.txt).
+    pub fn set_text(&self, path: &str, text: &str) {
+        self.state
+            .texts
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), text.to_string());
     }
 
     /// The document currently served at `path`.

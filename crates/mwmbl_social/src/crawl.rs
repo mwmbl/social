@@ -103,6 +103,8 @@ pub struct RobotsSource {
     store: Arc<Mutex<Store>>,
     token: String,
     memory: Mutex<HashMap<String, Cached>>,
+    /// One robots.txt fetch per host at a time: the others wait for it and use its result.
+    fetching: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl std::fmt::Debug for RobotsSource {
@@ -123,6 +125,7 @@ impl RobotsSource {
             store,
             token,
             memory: Mutex::new(HashMap::new()),
+            fetching: Mutex::new(HashMap::new()),
         }
     }
 
@@ -140,7 +143,8 @@ impl RobotsSource {
             .and_then(|r| r.crawl_delay_secs())
     }
 
-    /// What robots.txt says about `url`'s host: from memory, SQLite, or a fetch.
+    /// What robots.txt says about `url`'s host: from memory, SQLite, or a fetch (one per host
+    /// at a time).
     pub async fn verdict(&self, url: &Url, now: i64) -> RobotsVerdict {
         let unavailable = RobotsVerdict::Unavailable {
             retry_at: now.saturating_add(ROBOTS_RETRY_SECS),
@@ -151,8 +155,34 @@ impl RobotsSource {
         if let Some(cached) = self.cached(&host, now) {
             return cached.verdict();
         }
+        let lock = Arc::clone(
+            self.fetching
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(host.clone())
+                .or_default(),
+        );
+        let verdict = {
+            let _fetching = lock.lock().await;
+            // Whoever held the lock may have fetched it meanwhile.
+            match self.cached(&host, now) {
+                Some(cached) => cached.verdict(),
+                None => self.fetch(url, &host, now).await,
+            }
+        };
+        let mut fetching = self.fetching.lock().unwrap_or_else(PoisonError::into_inner);
+        // Two references: the map's and ours. Nobody else is waiting.
+        if Arc::strong_count(&lock) <= 2 {
+            fetching.remove(&host);
+        }
+        verdict
+    }
+
+    async fn fetch(&self, url: &Url, host: &str, now: i64) -> RobotsVerdict {
         let Some(robots_url) = robots_url(url) else {
-            return unavailable;
+            return RobotsVerdict::Unavailable {
+                retry_at: now.saturating_add(ROBOTS_RETRY_SECS),
+            };
         };
         let outcome = self
             .fetcher
@@ -170,7 +200,7 @@ impl RobotsSource {
             .store
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .set_host_robots(&host, stored.as_deref(), now)
+            .set_host_robots(host, stored.as_deref(), now)
         {
             tracing::error!(host, error = %e, "failed to record robots.txt");
         }
@@ -179,7 +209,7 @@ impl RobotsSource {
             checked_at: now,
         };
         let verdict = cached.verdict();
-        self.remember(&host, cached, now);
+        self.remember(host, cached, now);
         verdict
     }
 

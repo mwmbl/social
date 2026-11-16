@@ -656,6 +656,37 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
+    /// A crawl submission is decided as a backfill is (PLAN.md Stage 3 item 3): every case,
+    /// whatever its reason, gives the same actions as both, with the Lemmy context or without.
+    #[test]
+    fn crawl_items_are_decided_as_backfills() {
+        let mut failures = Vec::new();
+        for c in post_cases()
+            .into_iter()
+            .chain(more_post_cases())
+            .chain(context_post_cases())
+        {
+            for context in [c.context, LEMMY] {
+                let decide = |reason| {
+                    let got = decide_post(
+                        POST,
+                        reason,
+                        c.attempts,
+                        c.carried.clone(),
+                        &c.object,
+                        c.author.as_ref().map(|fetched| Author { fetched, context }),
+                        NOW,
+                    );
+                    got.iter().map(kind).collect::<Vec<_>>()
+                };
+                if decide(FetchReason::Crawl) != decide(Backfill) {
+                    failures.push(c.name);
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
     #[test]
     fn the_indexed_record_is_built_from_the_fetched_post() {
         let got = decide_post(
