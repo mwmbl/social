@@ -105,14 +105,20 @@ impl Store {
             .map_err(ctx(op))
     }
 
-    /// Records that our follow of `actor_uri` was sent again at `now`. Returns whether there
-    /// was one.
-    pub fn following_resent(&self, actor_uri: &str, now: i64) -> Result<bool, StoreError> {
+    /// Records that our follow of `actor_uri` was sent again at `now`, as `follow_id`: a re-sent
+    /// `Follow` needs a new id, since Lemmy 0.19 rejects an activity id it has seen (400).
+    /// Returns whether there was one.
+    pub fn following_resent(
+        &self,
+        actor_uri: &str,
+        follow_id: &str,
+        now: i64,
+    ) -> Result<bool, StoreError> {
         let changed = self
             .conn
             .execute(
-                "UPDATE following SET created_at = ?2 WHERE actor_uri = ?1",
-                params![actor_uri, now],
+                "UPDATE following SET created_at = ?2, follow_id = ?3 WHERE actor_uri = ?1",
+                params![actor_uri, now, follow_id],
             )
             .map_err(ctx(format!("record re-sent follow of {actor_uri}")))?;
         Ok(changed > 0)
@@ -160,12 +166,13 @@ mod tests {
             s.following(BOB)?.ok_or("no row")?.state,
             FollowState::Accepted
         );
-        assert!(s.following_resent(BOB, 30)?);
-        assert_eq!(s.following(BOB)?.ok_or("no row")?.created_at, 30);
+        assert!(s.following_resent(BOB, "f2", 30)?);
+        let row = s.following(BOB)?.ok_or("no row")?;
+        assert_eq!((row.created_at, row.follow_id.as_str()), (30, "f2"));
         assert!(s.remove_following(BOB)?);
         assert!(!s.remove_following(BOB)?);
         assert!(!s.accept_following(BOB)?);
-        assert!(!s.following_resent(BOB, 40)?);
+        assert!(!s.following_resent(BOB, "f3", 40)?);
         assert_eq!(s.following(BOB)?, None);
         Ok(())
     }

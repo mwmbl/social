@@ -18,7 +18,7 @@ if [ ! -f tls/root.crt ]; then
 fi
 if [ ! -f tls/lemmy_server ]; then
   echo "Patching Lemmy's compiled-in roots"
-  docker pull -q "$image" >/dev/null
+  docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image"
   docker run --rm --entrypoint cat "$image" /usr/local/bin/lemmy_server > tls/lemmy_server.orig
   python3 trust.py patch tls/lemmy_server.orig tls/lemmy_server tls/root.crt
   chmod 755 tls/lemmy_server

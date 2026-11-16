@@ -22,7 +22,8 @@ use fasp::registration::{RegistrationOutcome, register as fasp_register};
 use serde_json::{Value, json};
 use social_index::{SocialAccount, SocialPost, SocialReader, Tombstones};
 use store::{
-    EnqueueOutcome, FetchKind, FetchReason, NewFetch, RegistrationStatus, Store, TombstoneKind,
+    EnqueueOutcome, FetchKind, FetchReason, FollowState, Following, NewFetch, RegistrationStatus,
+    Store, TombstoneKind,
 };
 use tinyindex::TinyIndex;
 use tokio::sync::watch;
@@ -931,6 +932,9 @@ pub async fn follow(config: &Config, target: &str) -> anyhow::Result<Value> {
     }
     let actor = fetch_followable(&cx.fetcher, &uri).await?;
     if let Some(row) = cx.store.following(&actor.uri)? {
+        if row.state == FollowState::Pending {
+            return resend_follow(&cx, &row).await;
+        }
         return Ok(json!({
             "actor": row.actor_uri, "state": row.state.as_str(), "note": "already followed",
         }));
@@ -979,6 +983,38 @@ pub async fn follow(config: &Config, target: &str) -> anyhow::Result<Value> {
         "state": "pending",
         "delivered": delivered,
         "note": note,
+    }))
+}
+
+/// Delivers a pending follow again, under a new id (Lemmy 0.19 rejects an activity id it has
+/// seen). Lemmy 0.19 doesn't deliver an `Accept` to an instance it has just met: its delivery
+/// worker for a new instance starts after the newest activity, so the first follow from a new
+/// server is accepted but never answered (seen in dev/lemmy). Following again is how an admin
+/// re-asks without waiting a day.
+async fn resend_follow(cx: &FollowContext, row: &Following) -> anyhow::Result<Value> {
+    let id = activity_id(
+        &cx.our_actor,
+        "follows",
+        crate::now_millis(),
+        u64::from(std::process::id()),
+    );
+    let activity = follow_activity(&cx.our_actor, &id, &row.actor_uri);
+    let outcome = cx.deliver(&row.inbox, &activity).await?;
+    cx.finish();
+    let delivered = matches!(outcome, DeliveryOutcome::Delivered { .. });
+    if delivered {
+        cx.store.following_resent(&row.actor_uri, &id, now_secs())?;
+    }
+    tracing::info!(actor = row.actor_uri, delivered, "re-sent a pending follow");
+    Ok(json!({
+        "actor": row.actor_uri,
+        "state": row.state.as_str(),
+        "delivered": delivered,
+        "note": if delivered {
+            "still pending, so our Follow was sent again".to_owned()
+        } else {
+            format!("still pending; sending it again failed ({outcome:?})")
+        },
     }))
 }
 

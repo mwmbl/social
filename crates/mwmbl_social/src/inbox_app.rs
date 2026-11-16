@@ -643,9 +643,11 @@ impl InboxApp {
                 && row.created_at <= now.saturating_sub(RESEND_PENDING_AFTER_SECS)
             {
                 tracing::info!(actor = row.actor_uri, "re-sending a pending follow");
-                let follow = follow_activity(&self.inner.our_actor, &row.follow_id, &row.actor_uri);
+                // A new id: Lemmy rejects one it has seen.
+                let id = self.new_id("follows");
+                let follow = follow_activity(&self.inner.our_actor, &id, &row.actor_uri);
                 self.inner.deliveries.send(&row.inbox, &follow);
-                Self::log_store(self.store(|s| s.following_resent(&row.actor_uri, now)));
+                Self::log_store(self.store(|s| s.following_resent(&row.actor_uri, &id, now)));
             }
             if hint && !settings.targets.is_empty() && !configured.contains(&row.actor_uri) {
                 let optin = self.store(|s| s.is_follow_optin(&row.actor_uri));

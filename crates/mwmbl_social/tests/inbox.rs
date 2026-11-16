@@ -788,10 +788,16 @@ async fn an_admin_follow_of_a_lemmy_community_backfills_its_outbox() {
     let listed = following(&ours.config).unwrap();
     assert_eq!(listed[0]["actor"], community);
     assert_eq!(listed[0]["state"], "pending");
-    // Following again changes nothing.
+    // Following again while pending sends the same Follow again (Lemmy 0.19 drops the Accept
+    // for the first follow from a new instance).
     let again = follow(&ours.config, &community).await.unwrap();
-    assert_eq!(again["note"], "already followed");
-    assert_eq!(lemmy.delivered_to("/c/rust", "Follow").len(), 1);
+    assert_eq!(again["state"], "pending");
+    assert_eq!(again["delivered"], true);
+    let follows = lemmy.delivered_to("/c/rust", "Follow");
+    assert_eq!(follows.len(), 2);
+    assert_eq!(follows[1]["object"], community);
+    assert_ne!(follows[1]["id"], our_follow["id"]);
+    let our_follow = follows[1].clone();
 
     // The community accepts: the server reads its outbox and queues the posts.
     let accept = json!({"id": lemmy.url("/activities/accept/1"), "type": "Accept",
@@ -814,6 +820,10 @@ async fn an_admin_follow_of_a_lemmy_community_backfills_its_outbox() {
         FollowState::Accepted
     );
     assert_eq!(lemmy.hits("/c/rust/outbox"), 1);
+    // Once accepted, following again changes nothing.
+    let again = follow(&ours.config, &community).await.unwrap();
+    assert_eq!(again["note"], "already followed");
+    assert_eq!(lemmy.delivered_to("/c/rust", "Follow").len(), 2);
     // The boost of a post was not fetched.
     assert_eq!(other.hits("/post/boosted"), 0);
 
@@ -858,17 +868,18 @@ async fn configured_follows_are_followed_at_start_up() {
         !lemmy.delivered_to("/c/tea", "Follow").is_empty()
     })
     .await;
-    // The stale follow is sent again, under its own id, and is not re-sent at once.
+    // The stale follow is sent again under a new id (Lemmy rejects an id it has seen), which
+    // the row records, and is not re-sent at once.
     wait_until("the re-sent Follow", async || {
         !lemmy.delivered_to("/c/coffee", "Follow").is_empty()
     })
     .await;
-    assert_eq!(
-        lemmy.delivered_to("/c/coffee", "Follow")[0]["id"],
-        "old-follow"
-    );
+    let resent = lemmy.delivered_to("/c/coffee", "Follow")[0].clone();
+    assert_ne!(resent["id"], "old-follow");
+    assert_eq!(resent["object"], stale);
     let row = ours.store().following(&stale).unwrap().unwrap();
     assert!(row.created_at > now_secs() - 60);
+    assert_eq!(resent["id"], row.follow_id.as_str());
     let listed = following(&ours.config).unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 2, "{listed}");
 }

@@ -49,7 +49,10 @@ docker compose exec social mwmbl-social follow '!rust@lemmy.test'   # Accept, th
 docker compose exec social mwmbl-social search posts borrow
 ```
 
-Lemmy delivers in batches, so allow up to a minute for an activity to arrive. Then post,
+On a fresh Lemmy the first `follow` is accepted but its `Accept` never arrives (Lemmy only
+starts delivering to an instance it has just met after the next activity; see `PLAN.md`), so
+after a minute run the same `follow` again, which re-sends it. Lemmy delivers in batches, so
+allow up to a minute for any activity to arrive. Then post,
 comment, delete and remove with `./api.sh` (`./api.sh METHOD PATH [JSON] [JWT]`; log in with
 `./api.sh POST /api/v3/user/login '{"username_or_email":"carol","password":"carol-password-1234"}'`):
 `/api/v3/post`, `/api/v3/comment`, `/api/v3/post/delete`, `/api/v3/post/remove` (as admin,

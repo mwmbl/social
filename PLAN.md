@@ -796,14 +796,17 @@ follow opt-in, admin follows, outbox backfill and crawl submissions with robots.
   `Service`, `Application`, `Organization`) with an inbox on its own origin, records a pending
   row and delivers our `Follow` once, directly (not through the delivery task, which only a
   server runs). A refused delivery drops the row; a transient failure keeps it for the re-send.
-  Ids from the CLI are `{actor}/follows/<ms>-<pid>`.
+  Ids from the CLI are `{actor}/follows/<ms>-<pid>`. `follow` of an actor whose follow is still
+  pending sends it again at once, under a new id (Lemmy drops the first `Accept` to a new
+  instance, below); of an accepted one, it does nothing.
 - `unfollow` delivers `Undo{Follow}` (once; the row goes even if it fails) and removes nothing
   from the index: a community's posts are consented by their authors and host, not by our
   follow, and an account's own flags or opt-in decide for it.
 - Config: `follow = ["!rust@lemmy.example", …]` (env `MWMBL_SOCIAL_FOLLOW`, comma-separated;
   each entry is parsed at load). `serve` follows any not in `following` at start-up and every
   6 hours, resolving each handle once per process. Every follow still pending a day after it
-  was sent is re-sent (same id) and its `created_at` reset, so at most once a day; this covers
+  was sent is re-sent (new id, recorded in the row, since Lemmy rejects an activity id it has
+  seen) and its `created_at` reset, so at most once a day; this covers
   follow-backs and CLI follows too. Removing a target does not unfollow; on start-up each
   followed actor that is neither configured nor an opt-in is logged with a hint to `unfollow`.
 
@@ -878,7 +881,8 @@ only, Postgres 16, in dev/lemmy): the done-when's Lemmy half passes.
   (`Crawl-delay`).
 - Item 7 (follow opt-in) was not re-run here; the integration tests cover it.
 
-Fixed in our code (each with a test): our actor was an `Application`, and Lemmy parses a
+Fixed in our code (each with a test): a re-sent `Follow` now gets a new id, and `follow` of a
+pending actor re-sends it (see the next list for why). Our actor was an `Application`, and Lemmy parses a
 follower only as `Person`, `Service` or `Organization`, answering 400 ("unknown variant"), so it
 is now a `Service`. Lemmy answers an RFC 9421 signature with 400 (it only parses cavage-12),
 not 401, and since it ignores signatures on `GET`s a fetch had cached it as RFC 9421, so the
@@ -887,10 +891,15 @@ scheme. Captured 0.19.13 objects and the community outbox are fixtures in
 `crates/apub/tests/consent/lemmy019_*.json`.
 
 Lemmy 0.19 behaviour found end to end:
+- **The first `Accept` to a new instance is lost.** Lemmy creates a delivery worker for an
+  instance only on its next minutely refresh, and a new worker starts after the newest
+  activity, so the `Accept` of the first `Follow` from a server Lemmy has never seen is never
+  sent. Following again (a new id) gets an `Accept` about a minute later. Lemmy also answers
+  400 to an activity id it has already received.
 - The community outbox is one `OrderedCollection` with inline `orderedItems`, each an
-  `Announce{Create{Page}}`, and no paging. It holds posts only, the newest 50 (`FETCH_LIMIT_MAX`), so
-  **comments written before we follow are not backfilled**; only crawl submissions can reach
-  them.
+  `Announce{Create{Page}}`, and no paging. It holds posts only, the newest 50
+  (`FETCH_LIMIT_MAX`), so **comments written before we follow are not backfilled**; only
+  crawl submissions can reach them.
 - Moderator and admin removals are `Delete` (with the reason in `summary`) announced by the
   community, not `Remove`; `Remove` is only for mods and featured posts.
 - Every new post is also announced directly (`Announce` of the `Page`, for Mastodon), which we
