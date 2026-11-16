@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use apub::fetch::{
-    FetchError, FetchOutcome, Fetcher, FetcherConfig, HostSnapshot, SignatureScheme, user_agent,
+    FetchError, FetchOutcome, Fetcher, FetcherConfig, HostSnapshot, SignatureScheme, TextOutcome,
+    user_agent,
 };
 use apub::signatures::keys::{RsaSigningKey, RsaVerifyingKey, VerifyingKey};
 use apub::signatures::{cavage, rfc9421};
@@ -198,6 +199,13 @@ async fn route(host: &str, path: &str) -> Response<Body> {
             vec![b' '; 2048],
         ),
         "/text" => respond(200, &[("content-type", "text/html")], "<html>hello</html>"),
+        "/robots.txt" => respond(
+            200,
+            &[("content-type", "text/plain")],
+            "User-agent: *\nDisallow: /private\n",
+        ),
+        "/robots-redirect" => respond(302, &[("location", "/robots.txt")], ""),
+        "/teapot" => respond(418, &[], "short and stout"),
         "/slow" => {
             tokio::time::sleep(Duration::from_millis(100)).await;
             json_response(200, &json!({"id": id, "type": "Note"}))
@@ -740,4 +748,91 @@ async fn documents_keep_the_size_cap_and_backoff() {
         FetchOutcome::Backoff { .. }
     ));
     assert_eq!(h.fake.requests(), before, "nothing sent while backing off");
+}
+
+#[tokio::test]
+async fn text_is_read_raw_and_cut_at_the_limit() {
+    let h = harness(Accepts::Either).await;
+    assert_eq!(
+        h.fetcher.fetch_text(&h.url("/robots.txt"), 1024).await,
+        TextOutcome::Found(b"User-agent: *\nDisallow: /private\n".to_vec())
+    );
+    // Same-host redirects are followed; the body is cut, not refused.
+    assert_eq!(
+        h.fetcher.fetch_text(&h.url("/robots-redirect"), 10).await,
+        TextOutcome::Found(b"User-agent".to_vec())
+    );
+    assert_eq!(
+        h.fetcher.user_agent(),
+        user_agent("https://social.example/")
+    );
+}
+
+#[tokio::test]
+async fn text_status_answers() {
+    let h = harness(Accepts::Either).await;
+    for (path, status) in [("/gone404", 404), ("/refuse", 403), ("/teapot", 418)] {
+        assert_eq!(
+            h.fetcher.fetch_text(&h.url(path), 1024).await,
+            TextOutcome::ClientError { status },
+            "{path}"
+        );
+    }
+    assert!(matches!(
+        h.fetcher.fetch_text(&h.url("/redirect-away"), 1024).await,
+        TextOutcome::Failed(FetchOutcome::Error(FetchError::CrossHostRedirect { .. }))
+    ));
+    assert!(matches!(
+        h.fetcher.fetch_text(&h.url("/err500"), 1024).await,
+        TextOutcome::Failed(FetchOutcome::Error(FetchError::Status { status: 500, .. }))
+    ));
+    // The 500 started a backoff, which text fetches honour too.
+    assert!(matches!(
+        h.fetcher.fetch_text(&h.url("/robots.txt"), 1024).await,
+        TextOutcome::Failed(FetchOutcome::Backoff { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_guard_sees_each_redirect_target_before_it_is_requested() {
+    let h = harness(Accepts::Either).await;
+    let seen = Mutex::new(Vec::new());
+    let allow_all = |url: &url::Url| {
+        seen.lock().unwrap().push(url.path().to_owned());
+        true
+    };
+    assert!(matches!(
+        h.fetcher
+            .fetch_guarded(&h.url("/redirect-chain"), &allow_all)
+            .await,
+        FetchOutcome::Found { .. }
+    ));
+    assert_eq!(*seen.lock().unwrap(), ["/redirect", "/obj/target"]);
+
+    let refuse_target = |url: &url::Url| url.path() != "/obj/target";
+    let outcome = h
+        .fetcher
+        .fetch_guarded(&h.url("/redirect"), &refuse_target)
+        .await;
+    assert!(
+        matches!(
+            &outcome,
+            FetchOutcome::Error(FetchError::RedirectDisallowed { location, .. })
+                if location.ends_with("/obj/target")
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        h.fake.hits("/obj/target"),
+        1,
+        "only the first, allowed fetch"
+    );
+    // A cross-host target is refused before the guard is asked.
+    let never = |_: &url::Url| -> bool { panic!("asked about another host") };
+    assert!(matches!(
+        h.fetcher
+            .fetch_guarded(&h.url("/redirect-away"), &never)
+            .await,
+        FetchOutcome::Error(FetchError::CrossHostRedirect { .. })
+    ));
 }

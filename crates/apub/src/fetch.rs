@@ -12,6 +12,10 @@
 //!   429 and 5xx (or a network failure), during which nothing is sent at all.
 //! - Bodies are size-limited, and never logged.
 //!
+//! [`Fetcher::fetch_text`] reads a plain-text document such as robots.txt, keeping only its
+//! first bytes. [`Fetcher::fetch_guarded`] is [`Fetcher::fetch`] with a check on every redirect
+//! target before it is requested (robots.txt for crawl submissions).
+//!
 //! [`Fetcher::deliver`] sends one activity to an inbox with a signed `POST`, under the same
 //! per-host limits, backoff and scheme cache. It follows no redirects and never reads the body.
 //!
@@ -44,6 +48,7 @@ pub const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 const ACCEPT: &str = "application/activity+json, application/ld+json; \
                       profile=\"https://www.w3.org/ns/activitystreams\"";
 const ACCEPT_JSON: &str = "application/json";
+const ACCEPT_TEXT: &str = "text/plain";
 
 /// What is being fetched, which decides the `Accept` header and the checks on the body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +58,8 @@ enum Kind {
     ActivityPub,
     /// A plain JSON document such as nodeinfo, with no `id`.
     Document,
+    /// A plain-text document such as robots.txt.
+    Text,
 }
 
 impl Kind {
@@ -60,6 +67,7 @@ impl Kind {
         match self {
             Self::ActivityPub => ACCEPT,
             Self::Document => ACCEPT_JSON,
+            Self::Text => ACCEPT_TEXT,
         }
     }
 }
@@ -185,6 +193,8 @@ pub enum FetchError {
     CrossHostRedirect { uri: String, location: String },
     #[error("`{uri}` redirected more than {MAX_REDIRECTS} times")]
     TooManyRedirects { uri: String },
+    #[error("`{uri}` redirected to `{location}`, which the caller does not allow")]
+    RedirectDisallowed { uri: String, location: String },
     #[error("`{uri}` sent a bad redirect: {reason}")]
     BadRedirect { uri: String, reason: String },
     #[error("failed to sign the request for `{uri}`: {source}")]
@@ -220,6 +230,20 @@ pub enum FetchOutcome {
     },
     Error(FetchError),
 }
+
+/// What a plain-text fetch ([`Fetcher::fetch_text`]) got.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TextOutcome {
+    /// A 2xx answer, and the first bytes of its body (up to the requested limit).
+    Found(Vec<u8>),
+    /// A 4xx answer other than 429, including 401 and 403 under both signature schemes.
+    ClientError { status: u16 },
+    /// Nothing usable: a 429 or 5xx (the host now backs off), an active backoff, or an error.
+    Failed(FetchOutcome),
+}
+
+/// Checks a redirect target before it is requested; see [`Fetcher::fetch_guarded`].
+pub type RedirectGuard<'a> = &'a (dyn Fn(&Url) -> bool + Sync);
 
 /// What happened to one delivery ([`Fetcher::deliver`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,6 +357,7 @@ impl HostEntry {
 
 pub struct Fetcher {
     client: reqwest::Client,
+    user_agent: String,
     key: SigningKey,
     key_id: String,
     max_body_bytes: usize,
@@ -401,7 +426,7 @@ fn is_tombstone(json: &Value) -> bool {
 impl Fetcher {
     pub fn new(config: FetcherConfig) -> Result<Self, FetchError> {
         let client = reqwest::Client::builder()
-            .user_agent(config.user_agent)
+            .user_agent(config.user_agent.clone())
             .timeout(config.timeout)
             // Redirects are followed by hand, same host only.
             .redirect(reqwest::redirect::Policy::none())
@@ -411,6 +436,7 @@ impl Fetcher {
             })?;
         Ok(Self {
             client,
+            user_agent: config.user_agent,
             key: SigningKey::RsaV15Sha256(config.key),
             key_id: config.key_id,
             max_body_bytes: config.max_body_bytes,
@@ -432,6 +458,12 @@ impl Fetcher {
                 state: Mutex::new(HostState::default()),
             })
         }))
+    }
+
+    /// The `User-Agent` sent with every request.
+    #[must_use]
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
     }
 
     /// Simultaneous fetches allowed per host (`FetcherConfig::per_host_concurrency`).
@@ -502,7 +534,51 @@ impl Fetcher {
 
     /// Fetches `uri` with a signed `GET`. See [`FetchOutcome`].
     pub async fn fetch(&self, uri: &str) -> FetchOutcome {
-        self.get(uri, Kind::ActivityPub).await
+        self.get(uri, Kind::ActivityPub, None).await
+    }
+
+    /// [`Fetcher::fetch`], except that every redirect target (same host, already validated) is
+    /// passed to `guard` before it is requested, and one it refuses ends the fetch with
+    /// [`FetchError::RedirectDisallowed`]. The caller checks `uri` itself.
+    pub async fn fetch_guarded(&self, uri: &str, guard: RedirectGuard<'_>) -> FetchOutcome {
+        self.get(uri, Kind::ActivityPub, Some(guard)).await
+    }
+
+    /// Fetches a plain-text document (such as robots.txt) with a signed `GET`, under the same
+    /// per-host limits, backoff and same-host redirect rule as [`Fetcher::fetch`]. Only the
+    /// first `max_bytes` of the body are kept; the rest is not read. Never use it for anything
+    /// that is indexed.
+    pub async fn fetch_text(&self, uri: &str, max_bytes: usize) -> TextOutcome {
+        let (url, host, entry, _permit) = match self.admit(uri).await {
+            Ok(admitted) => admitted,
+            Err(outcome) => return TextOutcome::Failed(outcome),
+        };
+        let (response, url) = match self.follow(url, Kind::Text, &host, &entry, None).await {
+            Ok(done) => done,
+            Err(FetchOutcome::Refused { status }) => return TextOutcome::ClientError { status },
+            Err(outcome) => return TextOutcome::Failed(outcome),
+        };
+        let uri = url.as_str();
+        let status = response.status();
+        let code = status.as_u16();
+        let now = now_secs();
+        if code == 429 || status.is_server_error() {
+            return TextOutcome::Failed(self.backing_off(&response, &entry, &host, uri, now));
+        }
+        entry.succeeded();
+        if status.is_client_error() {
+            return TextOutcome::ClientError { status: code };
+        }
+        if !status.is_success() {
+            return TextOutcome::Failed(FetchOutcome::Error(FetchError::Status {
+                uri: uri.to_owned(),
+                status: code,
+            }));
+        }
+        match self.read_body(response, uri, max_bytes, true).await {
+            Ok(body) => TextOutcome::Found(body),
+            Err(e) => TextOutcome::Failed(FetchOutcome::Error(e)),
+        }
     }
 
     /// Fetches a plain JSON document (such as nodeinfo) with a signed `GET`, under the same
@@ -510,7 +586,7 @@ impl Fetcher {
     /// but without the `id`/origin check or `Tombstone` handling, which only apply to
     /// `ActivityPub` objects. Never use it for anything that is indexed.
     pub async fn fetch_document(&self, uri: &str) -> FetchOutcome {
-        self.get(uri, Kind::Document).await
+        self.get(uri, Kind::Document, None).await
     }
 
     /// The URL and host entry for a request to `uri`, once the host is not backing off and a
@@ -547,9 +623,13 @@ impl Fetcher {
         Ok((url, host, entry, permit))
     }
 
-    async fn get(&self, uri: &str, kind: Kind) -> FetchOutcome {
-        match self.admit(uri).await {
-            Ok((url, host, entry, _permit)) => self.follow(url, kind, &host, &entry).await,
+    async fn get(&self, uri: &str, kind: Kind, guard: Option<RedirectGuard<'_>>) -> FetchOutcome {
+        let (url, host, entry, _permit) = match self.admit(uri).await {
+            Ok(admitted) => admitted,
+            Err(outcome) => return outcome,
+        };
+        match self.follow(url, kind, &host, &entry, guard).await {
+            Ok((response, url)) => self.finish(response, &url, kind, &host, &entry).await,
             Err(outcome) => outcome,
         }
     }
@@ -594,7 +674,16 @@ impl Fetcher {
         }
     }
 
-    async fn follow(&self, start: Url, kind: Kind, host: &str, entry: &HostEntry) -> FetchOutcome {
+    /// Sends the request and follows same-host redirects. Returns the final, non-redirect
+    /// response and the URL it came from.
+    async fn follow(
+        &self,
+        start: Url,
+        kind: Kind,
+        host: &str,
+        entry: &HostEntry,
+        guard: Option<RedirectGuard<'_>>,
+    ) -> Result<(reqwest::Response, Url), FetchOutcome> {
         let original = start.to_string();
         let mut current = start;
         for _ in 0..=MAX_REDIRECTS {
@@ -603,10 +692,10 @@ impl Fetcher {
                 .await
             {
                 Ok(response) => response,
-                Err(outcome) => return outcome,
+                Err(outcome) => return Err(outcome),
             };
             if !response.status().is_redirection() {
-                return self.finish(response, &current, kind, host, entry).await;
+                return Ok((response, current));
             }
             let uri = current.to_string();
             let Some(location) = response
@@ -614,38 +703,49 @@ impl Fetcher {
                 .get(reqwest::header::LOCATION)
                 .and_then(|v| v.to_str().ok())
             else {
-                return FetchOutcome::Error(FetchError::BadRedirect {
+                return Err(FetchOutcome::Error(FetchError::BadRedirect {
                     uri,
                     reason: "no usable Location header".to_owned(),
-                });
+                }));
             };
             let mut next = match current.join(location) {
                 Ok(next) => next,
                 Err(e) => {
-                    return FetchOutcome::Error(FetchError::BadRedirect {
+                    return Err(FetchOutcome::Error(FetchError::BadRedirect {
                         uri,
                         reason: format!("bad Location: {e}"),
-                    });
+                    }));
                 }
             };
             next.set_fragment(None);
             if let Err(e) = self.check_scheme(&next, &uri) {
-                return FetchOutcome::Error(e);
+                return Err(FetchOutcome::Error(e));
             }
             // Same host only. A scheme change on the same host is allowed only to https.
             if host_key(&next) != host
                 || (next.scheme() != current.scheme() && next.scheme() != "https")
             {
                 tracing::debug!(host, uri, location = next.as_str(), "refusing redirect");
-                return FetchOutcome::Error(FetchError::CrossHostRedirect {
+                return Err(FetchOutcome::Error(FetchError::CrossHostRedirect {
                     uri,
                     location: next.to_string(),
-                });
+                }));
+            }
+            // The guard sees only a target that passed the checks above, so nothing it looks up
+            // (a robots.txt) is ever for a host we would not fetch from.
+            if guard.is_some_and(|allowed| !allowed(&next)) {
+                tracing::debug!(host, uri, location = next.as_str(), "redirect not allowed");
+                return Err(FetchOutcome::Error(FetchError::RedirectDisallowed {
+                    uri,
+                    location: next.to_string(),
+                }));
             }
             tracing::debug!(host, uri, location = next.as_str(), "following redirect");
             current = next;
         }
-        FetchOutcome::Error(FetchError::TooManyRedirects { uri: original })
+        Err(FetchOutcome::Error(FetchError::TooManyRedirects {
+            uri: original,
+        }))
     }
 
     /// One hop: the signed request, with the scheme fallback. Returns the response unless it is
@@ -808,19 +908,7 @@ impl Fetcher {
         let code = status.as_u16();
         let now = now_secs();
         if code == 429 || status.is_server_error() {
-            let retry_after = retry_after(&response, now);
-            let secs = entry.failed(now, retry_after, self.default_backoff);
-            tracing::debug!(host, uri, status = code, secs, "host is backing off");
-            return if code == 429 {
-                FetchOutcome::RateLimited {
-                    retry_after_secs: secs,
-                }
-            } else {
-                FetchOutcome::Error(FetchError::Status {
-                    uri: uri.to_owned(),
-                    status: code,
-                })
-            };
+            return self.backing_off(&response, entry, host, uri, now);
         }
         // The host answered properly: whatever the status, it is not struggling.
         entry.succeeded();
@@ -833,7 +921,10 @@ impl Fetcher {
                 status: code,
             });
         }
-        let body = match self.read_body(response, uri).await {
+        let body = match self
+            .read_body(response, uri, self.max_body_bytes, false)
+            .await
+        {
             Ok(body) => body,
             Err(e) => return FetchOutcome::Error(e),
         };
@@ -856,18 +947,48 @@ impl Fetcher {
         }
     }
 
+    /// A 429 or 5xx answer: starts the host's backoff and says so.
+    fn backing_off(
+        &self,
+        response: &reqwest::Response,
+        entry: &HostEntry,
+        host: &str,
+        uri: &str,
+        now: i64,
+    ) -> FetchOutcome {
+        let code = response.status().as_u16();
+        let retry_after = retry_after(response, now);
+        let secs = entry.failed(now, retry_after, self.default_backoff);
+        tracing::debug!(host, uri, status = code, secs, "host is backing off");
+        if code == 429 {
+            FetchOutcome::RateLimited {
+                retry_after_secs: secs,
+            }
+        } else {
+            FetchOutcome::Error(FetchError::Status {
+                uri: uri.to_owned(),
+                status: code,
+            })
+        }
+    }
+
+    /// Reads at most `limit` bytes of the body. A longer body is an error, or with `truncate`
+    /// is cut at `limit` (the rest is not read).
     async fn read_body(
         &self,
         mut response: reqwest::Response,
         uri: &str,
+        limit: usize,
+        truncate: bool,
     ) -> Result<Vec<u8>, FetchError> {
         let too_large = || FetchError::TooLarge {
             uri: uri.to_owned(),
-            limit: self.max_body_bytes,
+            limit,
         };
-        if response
-            .content_length()
-            .is_some_and(|len| len > self.max_body_bytes as u64)
+        if !truncate
+            && response
+                .content_length()
+                .is_some_and(|len| len > limit as u64)
         {
             return Err(too_large());
         }
@@ -875,8 +996,13 @@ impl Fetcher {
         loop {
             match response.chunk().await {
                 Ok(Some(chunk)) => {
-                    if body.len().saturating_add(chunk.len()) > self.max_body_bytes {
-                        return Err(too_large());
+                    if body.len().saturating_add(chunk.len()) > limit {
+                        if !truncate {
+                            return Err(too_large());
+                        }
+                        let room = limit.saturating_sub(body.len());
+                        body.extend(chunk.iter().take(room));
+                        return Ok(body);
                     }
                     body.extend_from_slice(&chunk);
                 }
