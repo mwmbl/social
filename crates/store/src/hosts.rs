@@ -15,6 +15,34 @@ pub struct Host {
     /// Do not contact the host before this time (Unix seconds).
     pub backoff_until: Option<i64>,
     pub blocked: bool,
+    /// The host's nodeinfo `software.name`, lowercased, once looked up. `None` with a
+    /// `software_checked_at` means the lookup failed.
+    pub software: Option<String>,
+    /// When `software` was last looked up (Unix seconds).
+    pub software_checked_at: Option<i64>,
+}
+
+/// The result of a host's last software lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSoftware {
+    /// Nodeinfo `software.name`, lowercased; `None` if the lookup failed.
+    pub software: Option<String>,
+    /// When the lookup was made (Unix seconds).
+    pub checked_at: i64,
+}
+
+const HOST_COLUMNS: &str =
+    "host, signature_scheme, backoff_until, blocked, software, software_checked_at";
+
+fn host_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Host> {
+    Ok(Host {
+        host: r.get(0)?,
+        signature_scheme: r.get(1)?,
+        backoff_until: r.get(2)?,
+        blocked: r.get(3)?,
+        software: r.get(4)?,
+        software_checked_at: r.get(5)?,
+    })
 }
 
 /// An admin-configured blocked domain (lowercase, no trailing dot).
@@ -32,16 +60,9 @@ impl Store {
     pub fn host(&self, host: &str) -> Result<Option<Host>, StoreError> {
         self.conn
             .query_row(
-                "SELECT host, signature_scheme, backoff_until, blocked FROM hosts WHERE host = ?1",
+                &format!("SELECT {HOST_COLUMNS} FROM hosts WHERE host = ?1"),
                 [host],
-                |r| {
-                    Ok(Host {
-                        host: r.get(0)?,
-                        signature_scheme: r.get(1)?,
-                        backoff_until: r.get(2)?,
-                        blocked: r.get(3)?,
-                    })
-                },
+                host_row,
             )
             .optional()
             .map_err(ctx(format!("read host {host}")))
@@ -52,21 +73,12 @@ impl Store {
         let op = "list hosts";
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT host, signature_scheme, backoff_until, blocked FROM hosts ORDER BY host",
-            )
+            .prepare(&format!("SELECT {HOST_COLUMNS} FROM hosts ORDER BY host"))
             .map_err(ctx(op))?;
-        stmt.query_map([], |r| {
-            Ok(Host {
-                host: r.get(0)?,
-                signature_scheme: r.get(1)?,
-                backoff_until: r.get(2)?,
-                blocked: r.get(3)?,
-            })
-        })
-        .map_err(ctx(op))?
-        .collect::<Result<_, _>>()
-        .map_err(ctx(op))
+        stmt.query_map([], host_row)
+            .map_err(ctx(op))?
+            .collect::<Result<_, _>>()
+            .map_err(ctx(op))
     }
 
     pub fn set_signature_scheme(
@@ -81,6 +93,43 @@ impl Store {
                 params![host, scheme],
             )
             .map_err(ctx(format!("set signature scheme of host {host}")))?;
+        Ok(())
+    }
+
+    /// The host's last software lookup, if one was recorded.
+    pub fn host_software(&self, host: &str) -> Result<Option<HostSoftware>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT software, software_checked_at FROM hosts
+                 WHERE host = ?1 AND software_checked_at IS NOT NULL",
+                [host],
+                |r| {
+                    Ok(HostSoftware {
+                        software: r.get(0)?,
+                        checked_at: r.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(ctx(format!("read software of host {host}")))
+    }
+
+    /// Records a software lookup: the lowercased nodeinfo `software.name`, or `None` when the
+    /// lookup failed, and when it was made.
+    pub fn set_host_software(
+        &self,
+        host: &str,
+        software: Option<&str>,
+        checked_at: i64,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT INTO hosts (host, software, software_checked_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (host) DO UPDATE SET software = excluded.software,
+                     software_checked_at = excluded.software_checked_at",
+                params![host, software, checked_at],
+            )
+            .map_err(ctx(format!("set software of host {host}")))?;
         Ok(())
     }
 
@@ -188,6 +237,41 @@ mod tests {
         assert_eq!(s.host("b.example")?.and_then(|h| h.signature_scheme), None);
         let hosts: Vec<String> = s.list_hosts()?.into_iter().map(|h| h.host).collect();
         assert_eq!(hosts, ["a.example", "b.example"]);
+        Ok(())
+    }
+
+    #[test]
+    fn host_software() -> TestResult {
+        let s = Store::open_in_memory()?;
+        assert_eq!(s.host_software("l.example")?, None);
+        // A host row from other state has no software lookup yet.
+        s.set_backoff("l.example", 9)?;
+        assert_eq!(s.host_software("l.example")?, None);
+        s.set_host_software("l.example", Some("lemmy"), 100)?;
+        assert_eq!(
+            s.host_software("l.example")?,
+            Some(HostSoftware {
+                software: Some("lemmy".into()),
+                checked_at: 100
+            })
+        );
+        // Other host state is kept.
+        let h = s.host("l.example")?.ok_or("missing")?;
+        assert_eq!(h.backoff_until, Some(9));
+        assert_eq!(h.software.as_deref(), Some("lemmy"));
+        assert_eq!(h.software_checked_at, Some(100));
+        // A failed lookup clears the name and records the time.
+        s.set_host_software("l.example", None, 200)?;
+        assert_eq!(
+            s.host_software("l.example")?,
+            Some(HostSoftware {
+                software: None,
+                checked_at: 200
+            })
+        );
+        // A new host.
+        s.set_host_software("g.example", Some("gotosocial"), 5)?;
+        assert!(s.host("g.example")?.is_some_and(|h| !h.blocked));
         Ok(())
     }
 

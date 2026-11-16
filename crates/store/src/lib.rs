@@ -15,7 +15,8 @@
 //! SQLite operational state for Mwmbl Social.
 //!
 //! Holds bounded state only: registrations, subscriptions, the fetch queue, hosts, tombstones
-//! and the sweep position. It never holds a row per document or per account, and never term
+//! and the sweep position, plus records of explicit user and admin actions (follow opt-ins,
+//! forgotten URIs). It never holds a row per document or per account, and never term
 //! lists: the index is the only record of what is indexed.
 //!
 //! The API is synchronous. Time is always passed in as `now` (Unix seconds); nothing here reads
@@ -23,6 +24,7 @@
 
 mod enums;
 mod error;
+mod follow_optins;
 mod hosts;
 mod queue;
 mod registrations;
@@ -41,7 +43,8 @@ pub use enums::{
     SubscriptionType, TombstoneKind,
 };
 pub use error::StoreError;
-pub use hosts::{DomainBlock, Host};
+pub use follow_optins::FollowOptin;
+pub use hosts::{DomainBlock, Host, HostSoftware};
 pub use queue::{EnqueueOutcome, NewFetch, QueuedFetch};
 pub use registrations::{NewRegistration, Registration};
 pub use subscriptions::{Backfill, Subscription};
@@ -154,6 +157,31 @@ mod tests {
         let store = Store::open(&path)?;
         assert_eq!(store.schema_version()?, SCHEMA_VERSION);
         assert_eq!(store.list_domain_blocks()?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn host_software_migration_keeps_existing_hosts() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("s.db");
+        {
+            // A database from before the software columns (migration 4).
+            let conn = Connection::open(&path)?;
+            for sql in schema::MIGRATIONS.iter().take(3) {
+                conn.execute_batch(sql)?;
+            }
+            conn.execute_batch("PRAGMA user_version = 3")?;
+            conn.execute(
+                "INSERT INTO hosts (host, backoff_until) VALUES ('a.example', 7)",
+                [],
+            )?;
+        }
+        let store = Store::open(&path)?;
+        let host = store.host("a.example")?.ok_or("missing")?;
+        assert_eq!(host.backoff_until, Some(7));
+        assert_eq!(host.software, None);
+        assert_eq!(store.host_software("a.example")?, None);
+        assert_eq!(store.follow_optins()?, []);
         Ok(())
     }
 

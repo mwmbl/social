@@ -1,7 +1,8 @@
 //! Versioned schema. `PRAGMA user_version` records how many entries of [`MIGRATIONS`] have run.
 //! Append new migrations; never edit one that has shipped.
 //!
-//! Every table is bounded by registrations, hosts or a fixed time window. None has a row per
+//! Every table is bounded by registrations, hosts, a fixed time window, or explicit user and
+//! admin actions. None has a row per
 //! document or account, and none holds term lists (CLAUDE.md principle 1).
 
 pub(crate) const MIGRATIONS: &[&str] = &[
@@ -104,6 +105,21 @@ CREATE TABLE orphaned_subscriptions (
     registration_id INTEGER NOT NULL REFERENCES registrations(id) ON DELETE CASCADE,
     remote_id       TEXT NOT NULL,
     PRIMARY KEY (registration_id, remote_id)
+);
+",
+    "
+-- Nodeinfo `software.name` per host (lowercased), for the Lemmy consent rule and crawl
+-- submissions, and when it was last looked up. NULL software with a check time: the lookup
+-- failed. Bounded by hosts.
+ALTER TABLE hosts ADD COLUMN software TEXT;
+ALTER TABLE hosts ADD COLUMN software_checked_at INTEGER;
+
+-- Authors who opted in to indexing by following our server actor (PLAN.md Stage 3). A record of
+-- a user action: bounded by those actions, like `forgotten` is by admin actions. A row goes
+-- when the author unfollows.
+CREATE TABLE follow_optins (
+    actor_uri   TEXT PRIMARY KEY,
+    followed_at INTEGER NOT NULL
 );
 ",
 ];
