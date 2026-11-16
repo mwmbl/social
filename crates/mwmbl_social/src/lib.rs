@@ -30,6 +30,7 @@ pub mod metrics;
 pub mod outbox;
 pub mod pacing;
 pub mod records;
+pub mod robots;
 pub mod search;
 pub mod sweep;
 pub mod worker;
