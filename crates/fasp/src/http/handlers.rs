@@ -8,7 +8,10 @@ use store::Registration;
 use super::respond::Reply;
 use super::{FaspState, capabilities};
 use crate::announcement::{Announcement, AnnouncementSource, parse_announcement};
-use crate::{Capability, DATA_SHARING_ID, DATA_SHARING_VERSION, PrivacyPolicy};
+use crate::{
+    ACCOUNT_SEARCH_ID, ACCOUNT_SEARCH_VERSION, Capability, DATA_SHARING_ID, DATA_SHARING_VERSION,
+    PrivacyPolicy,
+};
 
 pub(crate) async fn route<S: FaspState>(
     state: &S,
@@ -27,11 +30,15 @@ pub(crate) async fn route<S: FaspState>(
         ("POST", ["data_sharing", "v0", "announcements"]) => {
             announcements(state, registration, body).await
         }
+        ("GET", ["account_search", "v0", "search"]) => {
+            account_search(state, registration, parts.uri.query().unwrap_or("")).await
+        }
         (
             _,
             ["provider_info"]
             | ["capabilities", _, _, "activation"]
-            | ["data_sharing", "v0", "announcements"],
+            | ["data_sharing", "v0", "announcements"]
+            | ["account_search", "v0", "search"],
         ) => Reply::error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
         _ => Reply::error(StatusCode::NOT_FOUND, "not found"),
     }
@@ -175,4 +182,134 @@ fn store_failure(registration: &Registration, error: &store::StoreError) -> Repl
     tracing::error!(registration = registration.id, host = registration.base_url,
         error = %error, "store failure while handling a FASP request");
     Reply::error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+}
+
+/// The default and the largest `limit` of an account search.
+const DEFAULT_LIMIT: usize = 20;
+const MAX_LIMIT: usize = 100;
+
+/// The validated query of an account search.
+struct SearchParams {
+    term: String,
+    limit: usize,
+    offset: usize,
+    language: Option<String>,
+}
+
+/// A number made only of digits; one too large for `usize` saturates.
+fn parse_count(value: &str) -> Option<usize> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(value.parse().unwrap_or(usize::MAX))
+}
+
+fn parse_search_params(query: &str) -> Result<SearchParams, &'static str> {
+    let (mut term, mut limit, mut offset, mut language) = (None, None, None, None);
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        let slot = match key.as_ref() {
+            "term" => &mut term,
+            "limit" => &mut limit,
+            "offset" => &mut offset,
+            "language" => &mut language,
+            _ => continue,
+        };
+        // The first occurrence of a parameter wins.
+        slot.get_or_insert(value.into_owned());
+    }
+    let term = term
+        .filter(|t| !t.trim().is_empty())
+        .ok_or("term is required")?;
+    let limit = match limit {
+        None => DEFAULT_LIMIT,
+        Some(v) => match parse_count(&v) {
+            Some(n) if n > 0 => n.min(MAX_LIMIT),
+            _ => return Err("limit must be a positive integer"),
+        },
+    };
+    let offset = match offset {
+        None => 0,
+        Some(v) => parse_count(&v).ok_or("offset must be a non-negative integer")?,
+    };
+    let language = language
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty());
+    Ok(SearchParams {
+        term,
+        limit,
+        offset,
+        language,
+    })
+}
+
+/// The URL of the page after this one, for the `Link: rel="next"` header.
+fn next_page_url(base_url: &str, params: &SearchParams) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("term", &params.term);
+    query.append_pair("limit", &params.limit.to_string());
+    query.append_pair(
+        "offset",
+        &params.offset.saturating_add(params.limit).to_string(),
+    );
+    if let Some(language) = &params.language {
+        query.append_pair("language", language);
+    }
+    format!(
+        "{}/account_search/v0/search?{}",
+        base_url.trim_end_matches('/'),
+        query.finish()
+    )
+}
+
+/// `GET /account_search/v0/search`. 404 unless the registration enabled the capability, 422
+/// for a bad query, else a JSON array of actor URIs, with a `Link` header when more follow.
+async fn account_search<S: FaspState>(
+    state: &S,
+    registration: &Registration,
+    query: &str,
+) -> Reply {
+    let enabled = state.with_store(|s| {
+        s.capability_enabled(registration.id, ACCOUNT_SEARCH_ID, ACCOUNT_SEARCH_VERSION)
+    });
+    match enabled {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(
+                registration = registration.id,
+                host = registration.base_url,
+                "refused account_search: capability is not enabled"
+            );
+            return Reply::error(StatusCode::NOT_FOUND, "capability is not enabled");
+        }
+        Err(e) => return store_failure(registration, &e),
+    }
+    let params = match parse_search_params(query) {
+        Ok(params) => params,
+        Err(message) => return Reply::error(StatusCode::UNPROCESSABLE_ENTITY, message),
+    };
+    let page = state
+        .account_search(
+            registration.id,
+            &params.term,
+            params.limit,
+            params.offset,
+            params.language.as_deref(),
+        )
+        .await;
+    match page {
+        Ok(page) => {
+            let reply = Reply::json(StatusCode::OK, &page.uris);
+            if page.has_more {
+                let next = next_page_url(state.base_url(), &params);
+                reply.with_header("link", format!("<{next}>; rel=\"next\""))
+            } else {
+                reply
+            }
+        }
+        Err(e) => {
+            tracing::error!(registration = registration.id, host = registration.base_url,
+                error = %e, "account_search failed");
+            Reply::error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
 }

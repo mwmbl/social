@@ -132,6 +132,15 @@ impl FakeMastodon {
         format!("{}{path}", self.origin)
     }
 
+    /// Replaces (or adds) the document served at `path`.
+    pub fn set_doc(&self, path: &str, doc: Value) {
+        self.inner
+            .docs
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), doc);
+    }
+
     pub fn set_gone(&self, path: &str) {
         self.inner.gone.lock().unwrap().insert(path.to_string());
     }

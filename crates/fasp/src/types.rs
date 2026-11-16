@@ -10,6 +10,12 @@ pub const DATA_SHARING_ID: &str = "data_sharing";
 /// major part (`0`); both spellings are accepted and stored under this one.
 pub const DATA_SHARING_VERSION: &str = "0.1";
 
+/// Identifier of the `account_search` capability.
+pub const ACCOUNT_SEARCH_ID: &str = "account_search";
+/// The version of `account_search` we advertise. Mastodon activates it using only the major
+/// part (`0`); both spellings are accepted and stored under this one.
+pub const ACCOUNT_SEARCH_VERSION: &str = "0.1";
+
 /// A capability we advertise in `provider_info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capability {

@@ -20,7 +20,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use fasp::announcement::Announcement;
 use fasp::client::FaspClient;
-use fasp::http::{FaspState, router};
+use fasp::http::{AccountSearchPage, FaspState, router};
 use fasp::registration::{RegistrationOutcome, register};
 use fasp::{Capability, PrivacyPolicy, ProviderInfoConfig, StoreAccess};
 use serde_json::{Value, json};
@@ -334,7 +334,14 @@ pub struct TestState {
     pub extra: Vec<Capability>,
     pub capability_events: Mutex<Vec<(i64, String, bool)>>,
     pub announcements: Mutex<Vec<(i64, Announcement)>>,
+    /// What `account_search` returns, best first; it pages through this like the binary does.
+    pub search_results: Mutex<Vec<String>>,
+    /// Every `account_search` call: (registration, term, limit, offset, language).
+    pub search_calls: Mutex<Vec<SearchCall>>,
+    pub search_fails: AtomicBool,
 }
+
+pub type SearchCall = (i64, String, usize, usize, Option<String>);
 
 impl StoreAccess for TestState {
     fn with_store<R>(&self, f: impl FnOnce(&Store) -> R) -> R {
@@ -365,6 +372,29 @@ impl FaspState for TestState {
             .unwrap()
             .push((registration_id, announcement));
     }
+    async fn account_search(
+        &self,
+        registration_id: i64,
+        term: &str,
+        limit: usize,
+        offset: usize,
+        language: Option<&str>,
+    ) -> Result<AccountSearchPage, String> {
+        self.search_calls.lock().unwrap().push((
+            registration_id,
+            term.to_owned(),
+            limit,
+            offset,
+            language.map(str::to_owned),
+        ));
+        if self.search_fails.load(Ordering::SeqCst) {
+            return Err("boom".to_owned());
+        }
+        let all = self.search_results.lock().unwrap();
+        let uris: Vec<String> = all.iter().skip(offset).take(limit).cloned().collect();
+        let has_more = all.len() > offset + uris.len();
+        Ok(AccountSearchPage { uris, has_more })
+    }
 }
 
 pub struct Ours {
@@ -384,6 +414,9 @@ pub async fn start_ours(info: ProviderInfoConfig, extra: Vec<Capability>) -> Our
         extra,
         capability_events: Mutex::new(Vec::new()),
         announcements: Mutex::new(Vec::new()),
+        search_results: Mutex::new(Vec::new()),
+        search_calls: Mutex::new(Vec::new()),
+        search_fails: AtomicBool::new(false),
     });
     let app = router(state.clone());
     tokio::spawn(async move {

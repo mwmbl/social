@@ -39,7 +39,8 @@ pub trait FaspState: StoreAccess + 'static {
     /// The configurable `provider_info` fields.
     fn provider_info(&self) -> &ProviderInfoConfig;
 
-    /// Capabilities to advertise besides `data_sharing` 0.1, such as `account_search`.
+    /// Capabilities to advertise besides `data_sharing` 0.1, such as `account_search` (the state
+    /// must then implement [`FaspState::account_search`]).
     fn extra_capabilities(&self) -> Vec<Capability> {
         Vec::new()
     }
@@ -47,6 +48,21 @@ pub trait FaspState: StoreAccess + 'static {
     /// The current time, Unix seconds.
     fn now(&self) -> i64 {
         crate::system_now()
+    }
+
+    /// One page of `account_search` results for a registration that has the capability
+    /// enabled: actor URIs, best first, skipping `offset` and taking at most `limit` (already
+    /// validated and capped). `has_more` says whether another page follows. The default
+    /// implementation is an error, so state that does not search never serves the route.
+    fn account_search(
+        &self,
+        _registration_id: i64,
+        _term: &str,
+        _limit: usize,
+        _offset: usize,
+        _language: Option<&str>,
+    ) -> impl Future<Output = Result<AccountSearchPage, String>> + Send {
+        async { Err("account_search is not implemented".to_owned()) }
     }
 
     /// A capability was activated or deactivated by the server (already recorded in the
@@ -68,6 +84,15 @@ pub trait FaspState: StoreAccess + 'static {
         registration_id: i64,
         announcement: Announcement,
     ) -> impl Future<Output = ()> + Send;
+}
+
+/// One page of account search results.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountSearchPage {
+    /// Actor URIs, best first.
+    pub uris: Vec<String>,
+    /// Whether more results follow this page.
+    pub has_more: bool,
 }
 
 /// Every capability we advertise: `data_sharing` plus the state's extras.

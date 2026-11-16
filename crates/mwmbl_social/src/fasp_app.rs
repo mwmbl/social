@@ -9,7 +9,7 @@
 //! the queue, and the worker and the single writer do the rest (principle 5).
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use axum::Router;
@@ -17,11 +17,12 @@ use axum::routing::any_service;
 use fasp::announcement::{Announcement, AnnouncementSource, EventType};
 use fasp::client::FaspClient;
 use fasp::data_sharing::{on_backfill_announcement, on_disable, on_enable, resume_backfills};
-use fasp::http::{FaspState, router};
+use fasp::http::{AccountSearchPage, FaspState, router};
 use fasp::{
-    ClientError, DATA_SHARING_ID, DATA_SHARING_VERSION, PrivacyPolicy, ProviderInfoConfig,
-    StoreAccess,
+    ACCOUNT_SEARCH_ID, ACCOUNT_SEARCH_VERSION, Capability, ClientError, DATA_SHARING_ID,
+    DATA_SHARING_VERSION, PrivacyPolicy, ProviderInfoConfig, StoreAccess,
 };
+use social_index::{SocialAccount, SocialReader, Tombstones, search_accounts};
 use store::{
     BackfillState, Category, FetchKind, FetchReason, NewFetch, Registration, RegistrationStatus,
     Store, SubscriptionType,
@@ -41,10 +42,11 @@ const RESUME_BELOW_PERCENT: usize = 50;
 
 /// The paths our FASP router serves, as route patterns at the root of our base URL. Only these
 /// reach it: the FASP router authenticates every request it gets, so it must not see the rest.
-pub const FASP_ROUTES: [&str; 3] = [
+pub const FASP_ROUTES: [&str; 4] = [
     "/provider_info",
     "/capabilities/{*rest}",
     "/data_sharing/{*rest}",
+    "/account_search/{*rest}",
 ];
 
 struct Inner {
@@ -56,6 +58,11 @@ struct Inner {
     backfill_max_count: u32,
     /// Registrations with FASP client work in progress, so none runs twice at once.
     busy: Mutex<HashSet<i64>>,
+    /// The accounts index, read-only, for `account_search`. Results are pooled across every
+    /// registration (PLAN.md, Multi-tenancy).
+    accounts: SocialReader<SocialAccount>,
+    /// The writer's tombstones: blocked hosts and forgotten accounts never appear.
+    tombstones: Arc<RwLock<Tombstones>>,
 }
 
 /// How long to wait before fetching an object an `update` announcement names. Mastodon 4.7.5
@@ -120,8 +127,17 @@ fn below_percent(len: usize, cap: usize, percent: usize) -> bool {
 
 impl FaspApp {
     /// `store` is this component's own connection. `base_url` is our public base URL.
+    /// `accounts` and `tombstones` are the writer's (see `WriterHandle::readers` and
+    /// `WriterHandle::tombstones`), which `account_search` reads.
     #[must_use]
-    pub fn new(store: Store, http: reqwest::Client, config: &Config, base_url: &str) -> Self {
+    pub fn new(
+        store: Store,
+        http: reqwest::Client,
+        config: &Config,
+        base_url: &str,
+        accounts: SocialReader<SocialAccount>,
+        tombstones: Arc<RwLock<Tombstones>>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 store: Arc::new(Mutex::new(store)),
@@ -131,6 +147,8 @@ impl FaspApp {
                 queue_cap: config.queue_cap,
                 backfill_max_count: config.backfill_max_count,
                 busy: Mutex::new(HashSet::new()),
+                accounts,
+                tombstones,
             }),
         }
     }
@@ -409,6 +427,43 @@ impl FaspState for FaspApp {
 
     fn provider_info(&self) -> &ProviderInfoConfig {
         &self.inner.info
+    }
+
+    fn extra_capabilities(&self) -> Vec<Capability> {
+        vec![Capability::new(ACCOUNT_SEARCH_ID, ACCOUNT_SEARCH_VERSION)]
+    }
+
+    async fn account_search(
+        &self,
+        registration_id: i64,
+        term: &str,
+        limit: usize,
+        offset: usize,
+        language: Option<&str>,
+    ) -> Result<AccountSearchPage, String> {
+        let app = self.clone();
+        let term = term.to_owned();
+        let language = language.map(str::to_owned);
+        let searched = tokio::task::spawn_blocking(move || {
+            let tombstones = app
+                .inner
+                .tombstones
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            search_accounts(&app.inner.accounts, &term, &tombstones, language.as_deref())
+        })
+        .await
+        .map_err(|e| format!("the account search task failed: {e}"))?
+        .map_err(|e| format!("account search failed for registration {registration_id}: {e}"))?;
+        let mut uris: Vec<String> = searched
+            .into_iter()
+            .skip(offset)
+            .take(limit.saturating_add(1))
+            .map(|account| account.uri)
+            .collect();
+        let has_more = uris.len() > limit;
+        uris.truncate(limit);
+        Ok(AccountSearchPage { uris, has_more })
     }
 
     async fn on_capability_changed(&self, registration_id: i64, capability: &str, enabled: bool) {

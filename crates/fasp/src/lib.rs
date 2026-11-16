@@ -39,6 +39,6 @@ mod types;
 pub use access::StoreAccess;
 pub use error::{ClientError, NotEnabled, RegistrationError};
 pub use types::{
-    Capability, DATA_SHARING_ID, DATA_SHARING_VERSION, PrivacyPolicy, ProviderInfoConfig,
-    system_now,
+    ACCOUNT_SEARCH_ID, ACCOUNT_SEARCH_VERSION, Capability, DATA_SHARING_ID, DATA_SHARING_VERSION,
+    PrivacyPolicy, ProviderInfoConfig, system_now,
 };

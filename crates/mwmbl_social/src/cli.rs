@@ -347,6 +347,8 @@ async fn serve_with_lock(
         http_client(&base_url)?,
         &config,
         &base_url,
+        accounts.clone(),
+        handle.tombstones(),
     );
     tasks.spawn(
         fasp.clone()

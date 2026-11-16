@@ -569,6 +569,16 @@ per-host budgets) and a hosted sign-up page remain.
    - then summary matches, weighted by followers and activity
 3. Advertise it in `provider_info` and handle its activation.
 
+**Status (items 1-3):** implemented. `fasp::http` serves `GET /account_search/v0/search`: `term`
+required (missing or empty is 422), `limit` default 20, capped at 100 (0, negative or
+non-numeric is 422), optional `language`, plus our own `offset` for pagination. A `Link:
+rel="next"` header is sent only when more results follow. A registration that has not enabled
+`account_search` gets 404. It is advertised in `provider_info` and activated at `/0/` or `/0.1/`
+without remote calls. The binary's `FaspApp` runs `search_accounts` on `spawn_blocking` over the
+writer's accounts reader and shared tombstones, pooled across all registrations, and pages the
+ranked list by `offset`/`limit`. It returns actor URIs only. Open question 2 is settled: Mastodon
+sends `term` and `limit` only and ignores `Link`.
+
 **Done when** searching for accounts in the local Mastodon's UI returns results from us. This is
 the first point where an admin sees value, so after it: write install docs, publish a Docker
 image, and try a first external deployment.

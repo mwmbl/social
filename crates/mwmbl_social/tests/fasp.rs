@@ -152,7 +152,10 @@ async fn registers_activates_ingests_deletes_and_stops() {
     assert_eq!(info["name"], "Mwmbl Social");
     assert_eq!(
         info["capabilities"],
-        json!([{"id": "data_sharing", "version": "0.1"}])
+        json!([
+            {"id": "data_sharing", "version": "0.1"},
+            {"id": "account_search", "version": "0.1"},
+        ])
     );
     assert_eq!(
         info["privacyPolicy"],

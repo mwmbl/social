@@ -13,9 +13,18 @@ pub(crate) struct Reply {
     pub status: StatusCode,
     /// The JSON body; empty for 204 and bodiless errors.
     pub body: Vec<u8>,
+    /// Extra response headers (not covered by the signature), such as `Link`.
+    pub headers: Vec<(&'static str, String)>,
 }
 
 impl Reply {
+    /// Adds a response header.
+    #[must_use]
+    pub fn with_header(mut self, name: &'static str, value: String) -> Self {
+        self.headers.push((name, value));
+        self
+    }
+
     pub fn no_content() -> Self {
         Self::status(StatusCode::NO_CONTENT)
     }
@@ -24,12 +33,17 @@ impl Reply {
         Self {
             status,
             body: Vec::new(),
+            headers: Vec::new(),
         }
     }
 
     pub fn json<T: Serialize>(status: StatusCode, value: &T) -> Self {
         match serde_json::to_vec(value) {
-            Ok(body) => Self { status, body },
+            Ok(body) => Self {
+                status,
+                body,
+                headers: Vec::new(),
+            },
             Err(_) => Self::status(StatusCode::INTERNAL_SERVER_ERROR),
         }
     }
@@ -70,6 +84,7 @@ pub(crate) fn unsigned(status: StatusCode, message: &str) -> Response {
 /// keyid = our `serverId`.
 pub(crate) fn signed(registration: &Registration, reply: Reply, now: i64) -> Response {
     let digest = content_digest(&reply.body);
+    let mut extra = reply.headers;
     let key = match Ed25519SigningKey::from_seed_slice(&registration.our_private_key) {
         Ok(key) => SigningKey::Ed25519(key),
         Err(e) => {
@@ -87,15 +102,12 @@ pub(crate) fn signed(registration: &Registration, reply: Reply, now: i64) -> Res
         &key,
     );
     match signature {
-        Ok((input, signature)) => build(
-            reply.status,
-            reply.body,
-            &[
-                ("content-digest", digest),
-                ("signature-input", input),
-                ("signature", signature),
-            ],
-        ),
+        Ok((input, signature)) => {
+            extra.push(("content-digest", digest));
+            extra.push(("signature-input", input));
+            extra.push(("signature", signature));
+            build(reply.status, reply.body, &extra)
+        }
         Err(e) => {
             tracing::error!(registration = registration.id, error = %e, "failed to sign response");
             unsigned(StatusCode::INTERNAL_SERVER_ERROR, "cannot sign response")
@@ -147,6 +159,7 @@ mod tests {
                 Reply {
                     status,
                     body: body.clone(),
+                    headers: Vec::new(),
                 },
                 1_000,
             );
