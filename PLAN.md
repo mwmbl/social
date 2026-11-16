@@ -77,7 +77,8 @@ From `mastodon/fediverse_auxiliary_service_provider_specifications`, checked 202
     quiet-public objects don't qualify.
   - The creator must have opted in via FEP-5feb, and accounts must have `discoverable: true`.
   - For post full-text search we require `indexable: true` as well.
-  - Lemmy authors are the one exception; see Stage 3.
+  - Two exceptions, both in Stage 3: Lemmy authors, and authors who opt in by following our
+    server actor when their software has no `indexable` flag.
   - Servers send remote content too, so we deduplicate by URI.
 - **Revalidation:** deletes arrive as lifecycle events, but we must also recheck every stored
   item at least weekly. A delivered change notification lets us skip the check for that object
@@ -205,7 +206,8 @@ is the point.
 
 **Principle:** as in Mwmbl, the index is the only record of what is indexed. SQLite holds
 operational state only. It must not mirror the index or grow with it: no per-document or
-per-account rows, and no term lists. Every table below is bounded by the number of registrations
+per-account rows (except `follow_optins`, which is consent state; see below), and no term
+lists. Every table below is bounded by the number of registrations
 and hosts, or by a fixed time window.
 
 - **`registrations`**: id, the server's **FASP base URL** (`base_url`; this is what the client
@@ -235,6 +237,11 @@ and hosts, or by a fixed time window.
   - Expect thousands of rows, not millions.
   - Rows are cleared once a full sweep that started after them has finished, so it holds at
     most about one sweep period of entries.
+- **`follow_optins`**: actor URI, followed_at. Authors who opted in by following our server
+  actor (Stage 3). This is the one per-account table, allowed because it is consent state, not
+  a mirror of the index: consent has to be known before anything is indexed, so the index
+  can't hold it. It is bounded by explicit user actions, like `forgotten`. A row goes when the
+  author unfollows.
 - **`forgotten`**: URIs an admin forgot. Permanent, and bounded by admin actions.
 - **`sweep_state`**: the sweep's current page, and when the current and last sweeps started.
 
@@ -602,7 +609,7 @@ yet is the UI payoff: Mastodon only adds accounts it doesn't already know, and e
 in the e2e index came from that same Mastodon. Showing it needs a second server whose accounts
 reach us (e.g. a second Mastodon in dev/mastodon sharing data with us), or a real deployment.
 
-### Stage 3: Lemmy
+### Stage 3: Lemmy and follow opt-in
 
 Lemmy doesn't speak FASP, so content arrives two ways, both through the ActivityPub objects
 (never the REST API, which Lemmy's robots.txt disallows under `/api`):
@@ -649,10 +656,30 @@ from the origin ourselves means nothing new is trusted.
 6. Moderator removals: a `Remove` (or a community or instance removal seen on revalidation)
    tombstones like a delete. Crawled content gets no lifecycle events, so the sweep is the only
    path for its removals.
+7. **Follow opt-in for authors on software without FASP** (decided 2026-11-16). GoToSocial is
+   the motivating case: it doesn't speak FASP, and its default robots.txt and `X-Robots-Tag:
+   noindex` rule out crawling. A server admin can't opt their users in, since consent is per
+   author. So individual users opt in:
+   - A user follows our server actor. We record them in `follow_optins` and follow them back.
+     Their public posts then arrive in our inbox and go on the fetch queue as URIs, fetched from
+     the origin like everything else. On follow, backfill from their outbox if it is served.
+   - The actor's profile says plainly that following it means "index my public posts", and
+     that unfollowing removes them.
+   - Consent: following us counts as opt-in **only for flags the actor doesn't carry**. An
+     explicit `discoverable: false` or `indexable: false` still wins. Mastodon users already
+     have the flags, so a follow changes nothing for them. The consent function stays pure,
+     taking "follows us" as an input.
+   - Unfollow (`Undo` `Follow`): delete the row, add an author tombstone, and unfollow back.
+     Revalidation rechecks the follow like any other consent input.
+   - This works for any software without FEP-5feb, not only GoToSocial. Getting FASP into
+     GoToSocial is still the better long-term route; raise it with its developers once the
+     Mastodon integration can serve as a reference.
 
 **Done when** following a community on a local Lemmy indexes its new posts and comments, and
 removes them on delete and mod removal; and submitting URIs for a fake Lemmy host indexes
-them, except for paths its robots.txt disallows and replies from non-indexable authors.
+them, except for paths its robots.txt disallows and replies from non-indexable authors; and a
+fake actor without `indexable` that follows us gets its public posts indexed, which are removed
+when it unfollows, while one with `indexable: false` stays out.
 
 ### Stage 4: rest of FASP discovery
 
@@ -698,7 +725,7 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
   - page format and deletion (tinyindex)
   - tokeniser
   - consent evaluation (table-driven over real-world JSON samples from Mastodon, GoToSocial,
-    Misskey, Pleroma and Lemmy)
+    Misskey, Pleroma and Lemmy, with and without a follow opt-in)
   - signature sign/verify against the RFC 9421 test vectors
   - content-digest
 - **Integration tests:** a fake FASP-speaking server in-process (axum) for registration,
