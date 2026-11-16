@@ -1,7 +1,8 @@
 //! The signed `ActivityPub` `GET` client.
 //!
 //! [`Fetcher::fetch`] retrieves one object or actor by URI and says what happened as a
-//! [`FetchOutcome`]. It is the only thing in the project that talks to other people's servers, so
+//! [`FetchOutcome`]. [`Fetcher::fetch_document`] does the same for a plain JSON document such
+//! as nodeinfo. It is the only thing in the project that talks to other people's servers, so
 //! it is deliberately cautious:
 //!
 //! - Only `https://` (and `http://` when [`FetcherConfig::allow_http`] is set, for tests).
@@ -35,6 +36,26 @@ pub const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 
 const ACCEPT: &str = "application/activity+json, application/ld+json; \
                       profile=\"https://www.w3.org/ns/activitystreams\"";
+const ACCEPT_JSON: &str = "application/json";
+
+/// What is being fetched, which decides the `Accept` header and the checks on the body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// An `ActivityPub` object or actor: its `id` must be on the serving origin, and a
+    /// `Tombstone` counts as gone.
+    ActivityPub,
+    /// A plain JSON document such as nodeinfo, with no `id`.
+    Document,
+}
+
+impl Kind {
+    fn accept(self) -> &'static str {
+        match self {
+            Self::ActivityPub => ACCEPT,
+            Self::Document => ACCEPT_JSON,
+        }
+    }
+}
 
 /// Which HTTP signature scheme a host accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,6 +457,18 @@ impl Fetcher {
 
     /// Fetches `uri` with a signed `GET`. See [`FetchOutcome`].
     pub async fn fetch(&self, uri: &str) -> FetchOutcome {
+        self.get(uri, Kind::ActivityPub).await
+    }
+
+    /// Fetches a plain JSON document (such as nodeinfo) with a signed `GET`, under the same
+    /// per-host limits, backoff, same-host redirect rule and body size cap as [`Fetcher::fetch`],
+    /// but without the `id`/origin check or `Tombstone` handling, which only apply to
+    /// `ActivityPub` objects. Never use it for anything that is indexed.
+    pub async fn fetch_document(&self, uri: &str) -> FetchOutcome {
+        self.get(uri, Kind::Document).await
+    }
+
+    async fn get(&self, uri: &str, kind: Kind) -> FetchOutcome {
         let url = match self.parse_url(uri) {
             Ok(url) => url,
             Err(e) => return FetchOutcome::Error(e),
@@ -456,19 +489,19 @@ impl Fetcher {
         if let Some(until) = entry.active_backoff(now_secs()) {
             return FetchOutcome::Backoff { until };
         }
-        self.follow(url, &host, &entry).await
+        self.follow(url, kind, &host, &entry).await
     }
 
-    async fn follow(&self, start: Url, host: &str, entry: &HostEntry) -> FetchOutcome {
+    async fn follow(&self, start: Url, kind: Kind, host: &str, entry: &HostEntry) -> FetchOutcome {
         let original = start.to_string();
         let mut current = start;
         for _ in 0..=MAX_REDIRECTS {
-            let response = match self.send_signed(&current, host, entry).await {
+            let response = match self.send_signed(&current, kind, host, entry).await {
                 Ok(response) => response,
                 Err(outcome) => return outcome,
             };
             if !response.status().is_redirection() {
-                return self.finish(response, &current, host, entry).await;
+                return self.finish(response, &current, kind, host, entry).await;
             }
             let uri = current.to_string();
             let Some(location) = response
@@ -515,17 +548,18 @@ impl Fetcher {
     async fn send_signed(
         &self,
         url: &Url,
+        kind: Kind,
         host: &str,
         entry: &HostEntry,
     ) -> Result<reqwest::Response, FetchOutcome> {
         let first = entry.first_scheme();
-        let response = self.send_once(url, first, host, entry).await?;
+        let response = self.send_once(url, kind, first, host, entry).await?;
         if !auth_failed(response.status()) {
             Self::note_scheme(&response, first, entry);
             return Ok(response);
         }
         let second = first.other();
-        let response = self.send_once(url, second, host, entry).await?;
+        let response = self.send_once(url, kind, second, host, entry).await?;
         if auth_failed(response.status()) {
             return Err(FetchOutcome::Refused {
                 status: response.status().as_u16(),
@@ -546,6 +580,7 @@ impl Fetcher {
     async fn send_once(
         &self,
         url: &Url,
+        kind: Kind,
         scheme: SignatureScheme,
         host: &str,
         entry: &HostEntry,
@@ -601,7 +636,10 @@ impl Fetcher {
             }
         }
 
-        let mut request = self.client.get(uri).header(reqwest::header::ACCEPT, ACCEPT);
+        let mut request = self
+            .client
+            .get(uri)
+            .header(reqwest::header::ACCEPT, kind.accept());
         for (name, value) in &headers {
             request = request.header(name.as_str(), value.as_str());
         }
@@ -640,6 +678,7 @@ impl Fetcher {
         &self,
         response: reqwest::Response,
         url: &Url,
+        kind: Kind,
         host: &str,
         entry: &HostEntry,
     ) -> FetchOutcome {
@@ -686,11 +725,13 @@ impl Fetcher {
                 uri: uri.to_owned(),
             });
         };
-        if is_tombstone(&json) {
-            return FetchOutcome::Gone;
-        }
-        if let Err(e) = check_origin(&json, url) {
-            return FetchOutcome::Error(e);
+        if kind == Kind::ActivityPub {
+            if is_tombstone(&json) {
+                return FetchOutcome::Gone;
+            }
+            if let Err(e) = check_origin(&json, url) {
+                return FetchOutcome::Error(e);
+            }
         }
         FetchOutcome::Found {
             json,

@@ -187,6 +187,11 @@ async fn route(host: &str, path: &str) -> Response<Body> {
             &json!({"id": "http://evil.example/obj/1", "type": "Note"}),
         ),
         "/noid" => json_response(200, &json!({"type": "Note"})),
+        "/doc" => json_response(
+            200,
+            &json!({"version": "2.1", "software": {"name": "lemmy"}}),
+        ),
+        "/doc-redirect" => respond(302, &[("location", "/doc")], ""),
         "/big" => respond(
             200,
             &[("content-type", "application/activity+json")],
@@ -672,4 +677,67 @@ async fn seed_host_round_trips_through_host_states() {
         FetchOutcome::Found { .. }
     ));
     assert_eq!(a.fake.requests(), 3);
+}
+
+#[tokio::test]
+async fn documents_skip_the_object_checks_only() {
+    let h = harness(Accepts::Either).await;
+    // A document has no `id`, which `fetch` refuses and `fetch_document` accepts.
+    assert!(matches!(
+        h.fetch("/doc").await,
+        FetchOutcome::Error(FetchError::MissingId { .. })
+    ));
+    let FetchOutcome::Found { json, final_uri } = h.fetcher.fetch_document(&h.url("/doc")).await
+    else {
+        panic!("not found");
+    };
+    assert_eq!(json["software"]["name"], "lemmy");
+    assert_eq!(final_uri, h.url("/doc"));
+    let seen = h.fake.headers_seen.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|(k, v)| k == "accept" && v == "application/json"),
+        "{seen:?}"
+    );
+    // Nor is a `Tombstone` or a foreign id anything special in a document.
+    assert!(matches!(
+        h.fetcher.fetch_document(&h.url("/tombstone")).await,
+        FetchOutcome::Found { .. }
+    ));
+    assert!(matches!(
+        h.fetcher.fetch_document(&h.url("/spoof")).await,
+        FetchOutcome::Found { .. }
+    ));
+    // Same-host redirects are followed, others are not.
+    assert!(matches!(
+        h.fetcher.fetch_document(&h.url("/doc-redirect")).await,
+        FetchOutcome::Found { .. }
+    ));
+    assert!(matches!(
+        h.fetcher.fetch_document(&h.url("/redirect-away")).await,
+        FetchOutcome::Error(FetchError::CrossHostRedirect { .. })
+    ));
+    assert!(matches!(
+        h.fetcher.fetch_document(&h.url("/gone404")).await,
+        FetchOutcome::Gone
+    ));
+}
+
+#[tokio::test]
+async fn documents_keep_the_size_cap_and_backoff() {
+    let h = harness_with(Accepts::Either, |c| c.max_body_bytes = 1024).await;
+    assert!(matches!(
+        h.fetcher.fetch_document(&h.url("/big")).await,
+        FetchOutcome::Error(FetchError::TooLarge { limit: 1024, .. })
+    ));
+    assert!(matches!(
+        h.fetcher.fetch_document(&h.url("/limited")).await,
+        FetchOutcome::RateLimited { .. }
+    ));
+    let before = h.fake.requests();
+    assert!(matches!(
+        h.fetcher.fetch_document(&h.url("/doc")).await,
+        FetchOutcome::Backoff { .. }
+    ));
+    assert_eq!(h.fake.requests(), before, "nothing sent while backing off");
 }

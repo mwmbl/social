@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use apub::nodeinfo::nodeinfo_href;
 use apub::signatures::keys::{Ed25519SigningKey, Ed25519VerifyingKey};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -13,7 +14,6 @@ use url::Url;
 use crate::StoreAccess;
 use crate::error::RegistrationError;
 
-const NODEINFO_REL_PREFIX: &str = "http://nodeinfo.diaspora.software/ns/schema/";
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Random bytes in a generated `serverId`: 18 bytes are 24 url-safe characters.
@@ -84,13 +84,6 @@ async fn get_json(http: &reqwest::Client, url: &Url) -> Result<Value, Registrati
     })
 }
 
-/// `2.1` becomes `(2, 1)`; anything that is not `major.minor` is `None`.
-fn nodeinfo_version(rel: &str) -> Option<(u32, u32)> {
-    let version = rel.strip_prefix(NODEINFO_REL_PREFIX)?;
-    let (major, minor) = version.split_once('.')?;
-    Some((major.parse().ok()?, minor.parse().ok()?))
-}
-
 fn origin_of(url: &Url) -> Result<String, RegistrationError> {
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(invalid_url(url, "not an http(s) URL with a host"));
@@ -121,19 +114,10 @@ pub async fn discover_fasp_base_url(
         url: well_known.to_string(),
         reason: reason.to_owned(),
     };
-    let links = index
-        .get("links")
-        .and_then(Value::as_array)
-        .ok_or_else(|| bad("no `links` array"))?;
-    let href = links
-        .iter()
-        .filter_map(|link| {
-            let version = nodeinfo_version(link.get("rel")?.as_str()?)?;
-            (version.0 == 2).then_some((version, link.get("href")?.as_str()?))
-        })
-        .max_by_key(|(version, _)| *version)
-        .map(|(_, href)| href)
-        .ok_or_else(|| bad("no nodeinfo 2.x link"))?;
+    if index.get("links").and_then(Value::as_array).is_none() {
+        return Err(bad("no `links` array"));
+    }
+    let href = nodeinfo_href(&index).ok_or_else(|| bad("no nodeinfo 2.x link"))?;
     let nodeinfo_url = well_known
         .join(href)
         .map_err(|e| bad(&format!("bad nodeinfo link `{href}`: {e}")))?;
@@ -337,16 +321,6 @@ fn error_url(base_url: &str, reason: &str) -> RegistrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn nodeinfo_versions() {
-        let rel = |v: &str| format!("{NODEINFO_REL_PREFIX}{v}");
-        assert_eq!(nodeinfo_version(&rel("2.1")), Some((2, 1)));
-        assert_eq!(nodeinfo_version(&rel("2.0")), Some((2, 0)));
-        assert_eq!(nodeinfo_version(&rel("1.0")), Some((1, 0)));
-        assert_eq!(nodeinfo_version(&rel("x")), None);
-        assert_eq!(nodeinfo_version("http://other/2.1"), None);
-    }
 
     #[test]
     fn server_ids_are_long_url_safe_and_distinct() {

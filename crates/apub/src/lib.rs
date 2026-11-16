@@ -1,4 +1,4 @@
-//! `ActivityPub` client: signatures, signed fetches, object parsing and consent.
+//! `ActivityPub` client: signatures, signed fetches, nodeinfo, object parsing and consent.
 
 #![deny(
     clippy::exit,
@@ -18,5 +18,6 @@
 pub mod actor;
 pub mod consent;
 pub mod fetch;
+pub mod nodeinfo;
 pub mod objects;
 pub mod signatures;
