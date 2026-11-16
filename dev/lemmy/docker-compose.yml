@@ -1,0 +1,90 @@
+# End-to-end environment: Lemmy 0.19 (backend only) behind Caddy with a local CA, plus Mwmbl
+# Social. Both sides reach each other over HTTPS as lemmy.test and social.test. See README.md
+# here. Nothing in it talks to real fediverse servers.
+name: mwmbl-social-lemmy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lemmy
+      POSTGRES_PASSWORD: lemmy
+      POSTGRES_DB: lemmy
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "lemmy"]
+      interval: 2s
+      retries: 30
+    volumes: [db:/var/lib/postgresql/data]
+    networks: [e2e]
+
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./robots.txt:/srv/robots.txt:ro
+      - ./tls:/tls:ro
+      - caddy:/data
+    networks:
+      e2e:
+        aliases: [lemmy.test, social.test]
+    ports: ["127.0.0.1:8444:443"]
+
+  # Builds /ca/bundle.pem (system roots + our root) for Mwmbl Social's SSL_CERT_FILE.
+  ca:
+    image: caddy:2-alpine
+    command: >
+      sh -c 'cat /etc/ssl/certs/ca-certificates.crt /tls/root.crt > /ca/bundle.pem.tmp &&
+             mv /ca/bundle.pem.tmp /ca/bundle.pem && echo CA bundle ready'
+    volumes:
+      - ./tls:/tls:ro
+      - ca:/ca
+    networks: [e2e]
+
+  lemmy:
+    image: dessalines/lemmy:0.19.13
+    environment:
+      LEMMY_CONFIG_LOCATION: /config/config.hjson
+      RUST_LOG: warn,lemmy_server=info,lemmy_apub=debug,activitypub_federation=debug,lemmy_federate=debug
+    volumes:
+      - ./lemmy.hjson:/config/config.hjson:ro
+      # The released binary with our root in place of one compiled-in root (setup.sh).
+      - ./tls/lemmy_server:/usr/local/bin/lemmy_server:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      caddy: {condition: service_started}
+    restart: unless-stopped
+    networks: [e2e]
+
+  social:
+    build:
+      context: ../..
+    environment:
+      MWMBL_SOCIAL_BASE_URL: https://social.test
+      MWMBL_SOCIAL_LISTEN: 0.0.0.0:8080
+      MWMBL_SOCIAL_DATA_DIR: /data
+      MWMBL_SOCIAL_POSTS_PAGES: "4096"
+      MWMBL_SOCIAL_ACCOUNTS_PAGES: "1024"
+      MWMBL_SOCIAL_CRAWL_TOKENS: dev-crawl-token-0123456789
+      SSL_CERT_FILE: /ca/bundle.pem
+      RUST_LOG: info,mwmbl_social=debug,apub=debug
+    command: ["serve"]
+    volumes:
+      - social:/data
+      - ca:/ca:ro
+    depends_on: [ca]
+    networks: [e2e]
+
+networks:
+  e2e:
+    # Lemmy (activitypub_federation, outside debug mode) refuses any URL whose host resolves to a
+    # private, loopback or link-local address, and Docker's default subnets are private. So this
+    # network uses TEST-NET-2 (RFC 5737), which is reserved for documentation and never routed.
+    ipam:
+      config:
+        - subnet: 198.51.100.0/24
+
+volumes:
+  db:
+  caddy:
+  ca:
+  social:

@@ -1,0 +1,34 @@
+{
+	local_certs
+	skip_install_trust
+	# Our own root (see setup.sh and trust.py), so the patched Lemmy binary trusts it.
+	pki {
+		ca local {
+			root {
+				cert /tls/root.crt
+				key /tls/root.key
+			}
+		}
+	}
+}
+
+lemmy.test {
+	tls internal
+	# lemmy-ui serves robots.txt in a real deployment. We don't run lemmy-ui, so this is a
+	# verbatim copy of what lemmy-ui 0.19.13 serves (indentation included).
+	handle /robots.txt {
+		header Content-Type "text/plain; charset=utf-8"
+		root * /srv
+		file_server
+	}
+	# Everything else goes to the backend. A real deployment sends requests whose Accept is
+	# application/... and every POST to it, and the rest to lemmy-ui.
+	handle {
+		reverse_proxy lemmy:8536
+	}
+}
+
+social.test {
+	tls internal
+	reverse_proxy social:8080
+}

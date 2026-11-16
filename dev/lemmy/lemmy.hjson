@@ -1,0 +1,22 @@
+{
+  # Lemmy 0.19 config for the end-to-end environment. See README.md here.
+  hostname: "lemmy.test"
+  bind: "0.0.0.0"
+  port: 8536
+  tls_enabled: true
+  database: {
+    uri: "postgresql://lemmy:lemmy@postgres:5432/lemmy"
+  }
+  # Creates the admin and the site on first start.
+  setup: {
+    admin_username: "admin"
+    admin_password: "lemmy-admin-password"
+    site_name: "lemmy.test"
+  }
+  # No pict-rs: Lemmy starts without it, and nothing here needs images. With image_mode None it
+  # doesn't try to fetch thumbnails for post links either.
+  pictrs: {
+    url: "http://pictrs.invalid:8080/"
+    image_mode: None
+  }
+}

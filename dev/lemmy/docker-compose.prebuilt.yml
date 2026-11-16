@@ -1,0 +1,7 @@
+# Use with: docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml up -d social
+# (the image is the one in ../mastodon/prebuilt; copy the binary there first).
+services:
+  social:
+    build:
+      context: ../mastodon/prebuilt
+      dockerfile: Dockerfile
