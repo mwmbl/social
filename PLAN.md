@@ -588,6 +588,13 @@ sends `term` and `limit` only and ignores `Link`.
 the first point where an admin sees value, so after it: write install docs, publish a Docker
 image, and try a first external deployment.
 
+**Status (2026-11-16), end to end against Mastodon 4.7.5:** after enabling `account_search`,
+Mastodon's own `Fasp::Request` (which verifies our response's digest and signature) calls
+`/account_search/v0/search?term=alice&limit=10` and gets alice's actor URI. What isn't shown
+yet is the UI payoff: Mastodon only adds accounts it doesn't already know, and every account
+in the e2e index came from that same Mastodon. Showing it needs a second server whose accounts
+reach us (e.g. a second Mastodon in dev/mastodon sharing data with us), or a real deployment.
+
 ### Stage 3: Lemmy
 
 Ingest through federation, not the REST API:
