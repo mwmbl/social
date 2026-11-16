@@ -22,6 +22,8 @@ pub const MAX_BATCH_SIZE: u32 = 20;
 pub struct EnableOutcome {
     pub subscriptions_created: usize,
     pub backfills_created: usize,
+    /// Subscriptions from before a disable that were deleted on the server.
+    pub orphans_deleted: usize,
 }
 
 /// What [`on_disable`] removed locally.
@@ -58,6 +60,24 @@ pub async fn on_enable<S: StoreAccess>(
     let registration_id = client.registration_id();
     let data_sharing = client.data_sharing()?;
     let mut outcome = EnableOutcome::default();
+    // Subscriptions left over from before a disable: delete them on the server now that we may
+    // call it, or it keeps announcing to them alongside the new ones. A 404 means it already
+    // has; any other failure leaves the orphan to retry next time without blocking setup.
+    for remote_id in store.with_store(|s| s.list_orphaned_subscriptions(registration_id))? {
+        match data_sharing.unsubscribe(&remote_id).await {
+            Ok(()) | Err(ClientError::Status { status: 404, .. }) => {
+                store
+                    .with_store(|s| s.delete_orphaned_subscription(registration_id, &remote_id))?;
+                outcome.orphans_deleted += 1;
+            }
+            Err(e) => tracing::warn!(
+                registration = registration_id,
+                remote_id,
+                error = %e,
+                "could not delete an orphaned subscription"
+            ),
+        }
+    }
     for category in CATEGORIES {
         let has_subscription = store
             .with_store(|s| s.list_subscriptions(registration_id))?
@@ -100,17 +120,18 @@ pub async fn on_enable<S: StoreAccess>(
     Ok(outcome)
 }
 
-/// Switches `data_sharing` off locally: deletes the registration's subscription and backfill
-/// rows. It does not call the server. The capability is already disabled on its side, and
-/// calling a disabled capability's API is forbidden (CLAUDE.md principle 4), so the server's
-/// own copies are left to it to drop.
+/// Switches `data_sharing` off locally: orphans the registration's subscriptions and deletes
+/// its backfill rows. It does not call the server. The capability is already disabled on its
+/// side, and calling a disabled capability's API is forbidden (CLAUDE.md principle 4).
+/// Mastodon 4.7.5 keeps the subscriptions, so [`on_enable`] deletes the orphans on the server
+/// once the capability is enabled again.
 pub fn on_disable<S: StoreAccess>(
     store: &S,
     registration_id: i64,
 ) -> Result<DisableOutcome, store::StoreError> {
     store.with_store(|s| {
         Ok(DisableOutcome {
-            subscriptions_deleted: s.delete_subscriptions(registration_id)?,
+            subscriptions_deleted: s.orphan_subscriptions(registration_id)?,
             backfills_deleted: s.delete_backfills(registration_id)?,
         })
     })

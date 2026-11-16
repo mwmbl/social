@@ -98,6 +98,64 @@ impl Store {
             .map_err(ctx(op))
     }
 
+    /// Stop using a registration's subscriptions while its capability is disabled: move them to
+    /// `orphaned_subscriptions`, to be deleted on the server once calls are allowed again.
+    /// Returns how many were moved.
+    pub fn orphan_subscriptions(&self, registration_id: i64) -> Result<usize, StoreError> {
+        let op = format!("orphan subscriptions of registration {registration_id}");
+        let tx = self.conn.unchecked_transaction().map_err(ctx(op.clone()))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO orphaned_subscriptions (registration_id, remote_id)
+             SELECT registration_id, remote_id FROM subscriptions WHERE registration_id = ?1",
+            [registration_id],
+        )
+        .map_err(ctx(op.clone()))?;
+        let moved = tx
+            .execute(
+                "DELETE FROM subscriptions WHERE registration_id = ?1",
+                [registration_id],
+            )
+            .map_err(ctx(op.clone()))?;
+        tx.commit().map_err(ctx(op))?;
+        Ok(moved)
+    }
+
+    /// The remote ids of a registration's orphaned subscriptions.
+    pub fn list_orphaned_subscriptions(
+        &self,
+        registration_id: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        let op = format!("list orphaned subscriptions of registration {registration_id}");
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT remote_id FROM orphaned_subscriptions WHERE registration_id = ?1
+                 ORDER BY remote_id",
+            )
+            .map_err(ctx(op.clone()))?;
+        stmt.query_map([registration_id], |r| r.get(0))
+            .map_err(ctx(op.clone()))?
+            .collect::<Result<_, _>>()
+            .map_err(ctx(op))
+    }
+
+    /// Forget an orphaned subscription once the server has deleted it.
+    pub fn delete_orphaned_subscription(
+        &self,
+        registration_id: i64,
+        remote_id: &str,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "DELETE FROM orphaned_subscriptions WHERE registration_id = ?1 AND remote_id = ?2",
+                params![registration_id, remote_id],
+            )
+            .map_err(ctx(format!(
+                "delete orphaned subscription {remote_id} on registration {registration_id}"
+            )))?;
+        Ok(())
+    }
+
     /// Returns whether a subscription was deleted.
     pub fn delete_subscription(
         &self,

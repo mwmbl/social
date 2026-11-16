@@ -96,4 +96,14 @@ CREATE TABLE forgotten (
     created_at INTEGER NOT NULL
 );
 ",
+    "
+-- Subscriptions we stopped using while a capability was disabled, so we couldn't call the
+-- server to delete them. They are deleted on the server when the capability is enabled again.
+-- Bounded by registrations.
+CREATE TABLE orphaned_subscriptions (
+    registration_id INTEGER NOT NULL REFERENCES registrations(id) ON DELETE CASCADE,
+    remote_id       TEXT NOT NULL,
+    PRIMARY KEY (registration_id, remote_id)
+);
+",
 ];

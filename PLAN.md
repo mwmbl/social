@@ -523,7 +523,12 @@ removes it.
   `content` and `Actor` for `account`; reason `Announce` for lifecycle events and `Backfill` for
   backfill sources. For backfills `on_backfill_announcement` runs on a spawned task with
   `queue_has_room` = queue below 80% of `queue_cap`. Activation spawns `on_enable`
-  (`backfill_max_count`); deactivation runs `on_disable` (local rows only).
+  (`backfill_max_count`); deactivation runs `on_disable` (local rows only). Mastodon keeps its
+  subscriptions when a capability is disabled (seen end to end: a disable/enable left it
+  announcing to four), so `on_disable` moves ours to `orphaned_subscriptions`, and the next
+  `on_enable`, when calls are allowed again, deletes them on the server before subscribing.
+  Re-reading `provider_info` (re-approving) resets Mastodon's capability flags, which disables
+  everything.
 - A background task, every 60 s, takes each live registration with `data_sharing` enabled:
   if a subscription or backfill is missing (an earlier `on_enable` failed, say because the
   server was unreachable) it retries `on_enable`; otherwise it runs `resume_backfills` while the

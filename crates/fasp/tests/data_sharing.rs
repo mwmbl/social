@@ -95,7 +95,7 @@ async fn on_enable_requires_the_capability() {
 }
 
 #[tokio::test]
-async fn on_disable_deletes_local_rows_without_calling_the_server() {
+async fn on_disable_makes_no_calls_and_re_enable_deletes_the_orphans() {
     let env = Env::new().await;
     env.enable_data_sharing_in_store();
     let client = env.client();
@@ -133,10 +133,31 @@ async fn on_disable_deletes_local_rows_without_calling_the_server() {
 
     // Re-enabling starts from scratch.
     assert_eq!(env.activate("data_sharing", "0").await.status, 204);
+    // Mastodon keeps the old subscriptions when the capability is disabled, so re-enabling
+    // first deletes them on the server (now that calls are allowed), then subscribes afresh.
+    let before = env.mastodon.request_count();
     let outcome = on_enable(&client, &*env.ours.state, 2, 10).await.unwrap();
     assert_eq!(
-        (outcome.subscriptions_created, outcome.backfills_created),
-        (2, 2)
+        (
+            outcome.orphans_deleted,
+            outcome.subscriptions_created,
+            outcome.backfills_created
+        ),
+        (2, 2, 2)
+    );
+    let deletes = env.mastodon.requests()[before..]
+        .iter()
+        .filter(|(method, path)| {
+            method == "DELETE" && path.starts_with("/api/fasp/data_sharing/v0/event_subscriptions/")
+        })
+        .count();
+    assert_eq!(deletes, 2);
+    assert!(
+        env.ours
+            .state
+            .with_store(|s| s.list_orphaned_subscriptions(id))
+            .unwrap()
+            .is_empty()
     );
 }
 
