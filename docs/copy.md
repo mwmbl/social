@@ -247,10 +247,6 @@ Every setting can go in a TOML config file or an environment variable, such as
 `MWMBL_SOCIAL_CONTACT_EMAIL`. See the [README](https://github.com/mwmbl/social#configuration) for
 the full list.
 
-> [!NOTE]
-> `sign_in_url` and `root_redirect` are planned in PLAN.md ("Deployment and adoption") but not
-> yet implemented or in the README. Hold them back, or ship the site after they land.
-
 ### Back up your keys
 
 > [!WARNING]
