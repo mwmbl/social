@@ -909,8 +909,8 @@ Lemmy 0.19 behaviour found end to end:
 - A comment's `to` is only the public collection, its `cc` the community and the author; a
   person has no `discoverable` or `indexable`, so the Lemmy consent rule decides.
 - **Comments on a removed post stay served** (200) and so stay indexed: Lemmy sends no delete
-  for them and revalidation finds them. Open: whether to drop a comment whose `inReplyTo`
-  chain reaches a tombstoned post.
+  for them and revalidation finds them. Decided 2026-11-17: index whatever Lemmy serves, so
+  these comments stay indexed; a removal applies to the removed object only.
 - `GET`s are never required to be signed: `federation_signed_fetch` only makes Lemmy sign its
   own fetches.
 - Only cavage-12 signatures are accepted on `POST` (400 otherwise). Lemmy signs its deliveries
