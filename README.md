@@ -42,6 +42,10 @@ docker run -d --name mwmbl-social -p 127.0.0.1:8080:8080 -v mwmbl-social:/data \
   ghcr.io/mwmbl/social:main
 ```
 
+The container runs as uid and gid 10001, which owns `/data` in the image, so a named volume
+works as is. To use a host directory instead, give it to that user first, for example
+`sudo chown -R 10001:10001 /srv/mwmbl-social` before `-v /srv/mwmbl-social:/data`.
+
 Or build the image yourself with `docker build -t mwmbl-social .`.
 
 Or from source, with Rust 1.100:
