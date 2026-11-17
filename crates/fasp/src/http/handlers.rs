@@ -60,6 +60,8 @@ struct ProviderInfo<'a> {
     privacy_policy: &'a [PrivacyPolicy],
     capabilities: Vec<Capability>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    sign_in_url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     contact_email: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fediverse_account: Option<&'a str>,
@@ -73,6 +75,7 @@ fn provider_info<S: FaspState>(state: &S) -> Reply {
             name: &config.name,
             privacy_policy: &config.privacy_policy,
             capabilities: capabilities(state),
+            sign_in_url: config.sign_in_url.as_deref(),
             contact_email: config.contact_email.as_deref(),
             fediverse_account: config.fediverse_account.as_deref(),
         },

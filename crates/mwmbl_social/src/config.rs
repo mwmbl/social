@@ -52,6 +52,9 @@ pub struct Config {
     pub privacy_policy_language: String,
     /// The fediverse account (`@user@host`) of the operator, advertised in `provider_info`.
     pub fediverse_account: Option<String>,
+    /// Where a server admin signs in to manage their account with us, advertised as
+    /// `signInUrl` in `provider_info`.
+    pub sign_in_url: Option<String>,
     pub posts_pages: usize,
     pub accounts_pages: usize,
     pub page_size: usize,
@@ -123,6 +126,7 @@ impl Default for Config {
             privacy_policy_url: None,
             privacy_policy_language: "en".to_string(),
             fediverse_account: None,
+            sign_in_url: None,
             posts_pages: 65_536,
             accounts_pages: 16_384,
             page_size: 4096,
@@ -160,6 +164,21 @@ where
         value: value.to_string(),
         reason: e.to_string(),
     })
+}
+
+/// `value` must be an `http(s)` URL with a host.
+fn check_http_url(field: &'static str, value: &str) -> Result<(), ConfigError> {
+    let url = url::Url::parse(value).map_err(|e| ConfigError::Invalid {
+        field,
+        reason: format!("{value:?} is not a URL: {e}"),
+    })?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(ConfigError::Invalid {
+            field,
+            reason: format!("{value:?} must be an http(s) URL with a host"),
+        });
+    }
+    Ok(())
 }
 
 impl Config {
@@ -233,7 +252,8 @@ impl Config {
             base_url,
             contact_email,
             privacy_policy_url,
-            fediverse_account
+            fediverse_account,
+            sign_in_url,
         );
         set!(
             listen,
@@ -346,16 +366,12 @@ impl Config {
         if self.privacy_policy_language.trim().is_empty() {
             return Err(invalid("privacy_policy_language", "must not be empty"));
         }
-        if let Some(base_url) = &self.base_url {
-            let url = url::Url::parse(base_url).map_err(|e| ConfigError::Invalid {
-                field: "base_url",
-                reason: format!("{base_url:?} is not a URL: {e}"),
-            })?;
-            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-                return Err(ConfigError::Invalid {
-                    field: "base_url",
-                    reason: format!("{base_url:?} must be an http(s) URL with a host"),
-                });
+        for (field, value) in [
+            ("base_url", &self.base_url),
+            ("sign_in_url", &self.sign_in_url),
+        ] {
+            if let Some(value) = value {
+                check_http_url(field, value)?;
             }
         }
         Ok(())
@@ -450,6 +466,7 @@ mod tests {
         assert!(!config.allow_http);
         assert_eq!(config.privacy_policy_language, "en");
         assert_eq!(config.fediverse_account, None);
+        assert_eq!(config.sign_in_url, None);
         assert_eq!(config.backfill_max_count, 100);
         assert_eq!(
             config.trends_threshold(),
@@ -480,6 +497,7 @@ mod tests {
             privacy_policy_url = "https://social.example/privacy"
             privacy_policy_language = "de"
             fediverse_account = "@admin@social.example"
+            sign_in_url = "https://social.example/sign-in"
             backfill_max_count = 25
             trends_timeframe_minutes = 60
             trends_shares = 5
@@ -505,6 +523,10 @@ mod tests {
         assert_eq!(
             config.fediverse_account.as_deref(),
             Some("@admin@social.example")
+        );
+        assert_eq!(
+            config.sign_in_url.as_deref(),
+            Some("https://social.example/sign-in")
         );
         assert_eq!(config.backfill_max_count, 25);
         assert_eq!(config.trends_threshold().timeframe_minutes, 60);
@@ -552,6 +574,7 @@ mod tests {
                 ("MWMBL_SOCIAL_KEY_SPECIAL", "2"),
                 ("MWMBL_SOCIAL_PRIVACY_POLICY_LANGUAGE", "fr"),
                 ("MWMBL_SOCIAL_FEDIVERSE_ACCOUNT", "@me@x.example"),
+                ("MWMBL_SOCIAL_SIGN_IN_URL", "https://x.example/in"),
                 ("MWMBL_SOCIAL_BACKFILL_MAX_COUNT", "7"),
                 ("MWMBL_SOCIAL_METRICS", "true"),
                 ("MWMBL_SOCIAL_REVALIDATE_INTERVAL_PER_HOST_MS", "250"),
@@ -575,6 +598,7 @@ mod tests {
         assert_eq!(config.revalidate_interval_per_host_ms, 250);
         assert_eq!(config.privacy_policy_language, "fr");
         assert_eq!(config.fediverse_account.as_deref(), Some("@me@x.example"));
+        assert_eq!(config.sign_in_url.as_deref(), Some("https://x.example/in"));
         assert_eq!(config.backfill_max_count, 7);
         assert!(config.metrics);
         assert_eq!(config.posts_pages, 256);
@@ -640,6 +664,11 @@ mod tests {
         assert!(bad(&|c| c.base_url = Some("mailto:a@b.example".into())).is_some());
         assert!(bad(&|c| c.base_url = Some("http://localhost:8080".into())).is_none());
         assert!(bad(&|c| c.base_url = Some("https://social.example/".into())).is_none());
+        assert!(
+            bad(&|c| c.sign_in_url = Some("javascript:alert(1)".into()))
+                .is_some_and(|e| e.contains("sign_in_url"))
+        );
+        assert!(bad(&|c| c.sign_in_url = Some("https://mwmbl.example/in".into())).is_none());
     }
 
     #[test]

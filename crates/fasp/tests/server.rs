@@ -242,6 +242,7 @@ async fn provider_info_with_configuration_and_extra_capabilities() {
             privacy("https://example.com/privacy", "en"),
             privacy("https://example.com/datenschutz", "de"),
         ],
+        sign_in_url: Some("https://example.com/sign-in".to_owned()),
         contact_email: Some("admin@example.com".to_owned()),
         fediverse_account: Some("@admin@example.com".to_owned()),
     };
@@ -261,6 +262,7 @@ async fn provider_info_with_configuration_and_extra_capabilities() {
                 {"id": "data_sharing", "version": "0.1"},
                 {"id": "account_search", "version": "0.1"},
             ],
+            "signInUrl": "https://example.com/sign-in",
             "contactEmail": "admin@example.com",
             "fediverseAccount": "@admin@example.com",
         })

@@ -61,6 +61,8 @@ pub struct PrivacyPolicy {
 pub struct ProviderInfoConfig {
     pub name: String,
     pub privacy_policy: Vec<PrivacyPolicy>,
+    /// Where a server admin signs in to manage their account with us (`signInUrl`).
+    pub sign_in_url: Option<String>,
     pub contact_email: Option<String>,
     pub fediverse_account: Option<String>,
 }

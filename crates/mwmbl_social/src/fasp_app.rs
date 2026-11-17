@@ -120,6 +120,7 @@ pub fn provider_info(config: &Config) -> ProviderInfoConfig {
                 language: config.privacy_policy_language.clone(),
             })
             .collect(),
+        sign_in_url: config.sign_in_url.clone(),
         contact_email: config.contact_email.clone(),
         fediverse_account: config.fediverse_account.clone(),
     }
@@ -851,10 +852,12 @@ mod tests {
         assert_eq!(bare.privacy_policy.len(), 0);
         assert_eq!(bare.contact_email, None);
         assert_eq!(bare.fediverse_account, None);
+        assert_eq!(bare.sign_in_url, None);
 
         config.privacy_policy_url = Some("https://social.example/privacy".into());
         config.contact_email = Some("admin@social.example".into());
         config.fediverse_account = Some("@admin@social.example".into());
+        config.sign_in_url = Some("https://mwmbl.example/social/sign-in".into());
         let full = provider_info(&config);
         assert_eq!(
             full.privacy_policy,
@@ -872,6 +875,10 @@ mod tests {
             Some("de")
         );
         assert_eq!(full.contact_email.as_deref(), Some("admin@social.example"));
+        assert_eq!(
+            full.sign_in_url.as_deref(),
+            Some("https://mwmbl.example/social/sign-in")
+        );
         assert_eq!(
             full.fediverse_account.as_deref(),
             Some("@admin@social.example")
