@@ -19,6 +19,7 @@ pub mod actor;
 pub mod consent;
 pub mod fetch;
 pub mod inbox;
+pub mod net;
 pub mod nodeinfo;
 pub mod objects;
 pub mod signatures;
