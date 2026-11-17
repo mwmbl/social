@@ -156,7 +156,8 @@ crates/
                 `hs2019` accepted on verify. Cavage verification requires a covered `date` or
                 `(created)` and checks its skew.)
   fasp/         FASP general (registration, provider_info, activation, request signing/
-                verification, content-digest) + data_sharing + account_search handlers
+                verification, content-digest) + data_sharing + account_search, trends and
+                follow_recommendation handlers
   mwmbl_social/ binary: axum server, background workers, CLI, config
 ```
 
@@ -251,6 +252,16 @@ explicit user and admin actions.
   matches the `Accept` and is what our `Undo` names.
 - **`forgotten`**: URIs an admin forgot. Permanent, and bounded by admin actions.
 - **`sweep_state`**: the sweep's current page, and when the current and last sweeps started.
+- **`subscriptions`** also holds one content `trends` subscription per `data_sharing`
+  registration (Stage 4): bounded by registrations like the rest.
+
+**Not in SQLite: the trend state** (Stage 4, `mwmbl_social::trends`). In memory only: post URI
+→ hourly `trending` event counts for the last 168 hours (the longest `withinLastHours` the
+spec requires), at most `trends_max_uris` URIs (default 5000), the least announced (then least
+recently announced) evicted at the cap. So it is bounded by a fixed window and a cap, not by the
+index; it holds URIs and counts, never content or term lists; and a restart only empties it.
+It is not a record of what is indexed: it records URIs as announced (Mastodon announces trending
+statuses whatever their visibility), and is never served without a posts-index lookup.
 
 Never store non-public objects, anywhere.
 
@@ -524,7 +535,8 @@ removes it.
    the URIs with priority (new/update > backfill > revalidate), and return 204 quickly.
    Announcements are dropped (still 204) when `data_sharing` is not enabled for the
    registration or the source id is not one of its subscriptions or backfills; `trending`
-   events are dropped; at most 1000 `http(s)` URIs are taken per request; a malformed body
+   events are accepted only from a `trends` subscription, and lifecycle events only from a
+   `lifecycle` one (Stage 4 routes `trending` to the trend state); at most 1000 `http(s)` URIs are taken per request; a malformed body
    gets 422.
 6. Tune the sweep's revalidation against real servers: spread the fetches and respect per-host
    budgets, so a weekly pass doesn't overload a big host. (Done: `mwmbl_social::pacing`.)
@@ -926,7 +938,89 @@ Lemmy 0.19 behaviour found end to end:
 1. `trends` (content). We can use the `trends` subscription type of data_sharing as input.
 2. `follow_recommendation`.
 3. Take part in drafting the status/post search spec, using our post index as a reference
-   implementation.
+   implementation. **Out of scope for now** (decided 2026-11-17): nothing is posted on the spec
+   repository, Mastodon or anywhere else; notes about it stay in this file.
+
+**Spec facts** (`discovery/trends/v0.1`, `discovery/follow_recommendation/v0.1`, data_sharing,
+checked 2026-11-17):
+- `trends`: `GET /trends/v0/content`, `/trends/v0/hashtags`, `/trends/v0/links`, all with
+  optional `withinLastHours` (positive integer, default 24; a FASP MUST support up to 168),
+  `maxCount` (positive integer, default 20) and `language` (RFC 4647 basic filtering). 200 with
+  `{"content": [{uri, rank}]}`, `{"hashtags": [{name, rank, examples}]}` or `{"links": [{url,
+  rank, examples}]}`, sorted by rank descending. `rank` is 1..=100 (100 = most trending) and
+  MUST be comparable between instances of the same software, so their results merge by rank.
+  How trends are computed is up to the FASP, which SHOULD document it. No error code is
+  specified for bad options.
+- data_sharing `trends` subscriptions: `category` must be `content`; optional `threshold`
+  `{timeframe (minutes, 15), shares (3), likes (3), replies (3)}`. Announcements carry
+  `eventType: trending`.
+- `follow_recommendation`: `GET /follow_recommendation/v0/accounts?accountUri=&language=`,
+  200 with a JSON array of actor URIs; a missing `accountUri` is 422. The server filters out
+  accounts its user already follows or blocks. The account URI may identify the person asking.
+
+**What Mastodon `main` does** (2026-11-17):
+- It never calls `trends`. It only *sends* `trending` events (`Fasp::AnnounceTrendWorker`): on
+  each favourite, boost or reply of a status by an indexable author, for every active content
+  `trends` subscription whose threshold is met (count of that interaction kind within
+  `timeframe` ≥ its threshold), one announcement per interaction, one URI each. It checks the
+  author's `indexable` but **not the status's visibility**. It stores the threshold in columns
+  it compares against, defaulting missing keys to the spec's values only when a `threshold`
+  object is sent, so we always send all four.
+- It calls `follow_recommendation` from `GET /api/v2/suggestions` (an async refresh,
+  `Fasp::FollowRecommendationWorker`): `GET /follow_recommendation/v0/accounts?accountUri=<the
+  user's URI>`, no `language`, read as a JSON array; each URI not already known is fetched and
+  stored as a recommendation for a day. Known accounts are skipped, so only remote,
+  not-yet-seen accounts show up.
+
+**Status (items 1 and 2): implemented** (not yet checked end to end; Mastodon does not call
+`trends`).
+- `fasp`: `EventType::Trending`; `on_enable(.., trends: Option<TrendsThreshold>)` also creates
+  the content `trends` subscription (all four threshold keys, `maxBatchSize` 20). A `trending`
+  event is accepted only from a `trends` subscription, lifecycle events only from a
+  `lifecycle` one; a `trending` account event is dropped. `fasp::http` serves the three trends
+  routes and `follow_recommendation` through `FaspState::{trending_content, trending_hashtags,
+  trending_links, follow_recommendations}` (links default to an empty list). Both need their
+  capability enabled (else a signed 404), checked before the options. `withinLastHours` and
+  `maxCount` must be positive integers (else 422, like `account_search`); `withinLastHours`
+  is clamped to 168 and `maxCount` capped at 100. A missing or blank `accountUri` is 422. The
+  account URI is never logged.
+- Advertised in `provider_info` (`trends` 0.1, `follow_recommendation` 0.1), activated at `/0/`
+  or `/0.1/` with no remote call. `FASP_ROUTES` has `/trends/{*rest}` and
+  `/follow_recommendation/{*rest}`.
+- Binary: with `data_sharing` on, `on_enable` subscribes to trends with
+  `trends_timeframe_minutes`/`trends_shares`/`trends_likes`/`trends_replies` (defaults 15, 3,
+  3, 3); the 60 s maintenance adds the subscription to registrations that predate it. Each
+  `trending` URI counts one event in the trend state (pooled across registrations); one not
+  found by `uri:` lookup is queued as kind object, reason **backfill** (so a full queue defers
+  it instead of displacing lifecycle work), fetched from its origin and judged for consent.
+- **How trends are computed** (documented for admins, as the spec asks): a post's score is the
+  number of `trending` events servers sent for it within `withinLastHours` (hour buckets, the
+  current hour included). Candidates are taken best first (ties: most recently announced) and
+  each looked up in the posts index (at most 500 lookups per request); one that is missing
+  (never fetched, refused for consent, or off its page) or tombstoned is skipped, so trends
+  never surface anything we could not index. With `language`, a post must carry a matching
+  language (posts without one are left out, unlike `account_search`'s accounts). `rank` is
+  `1 + 20·log2(1 + score)` in integers, capped at 100 (1 event: 21, 3: 41, 31+: 100): an
+  absolute scale, so instances merge. Hashtags: those in the stored title and extract of the
+  same trending posts, each scored by the sum of its posts' events, with up to 3 of them as
+  examples. Links: always empty, since extracts are stripped of HTML and we keep no link URLs.
+- **Follow recommendations:** if the asker's account is in our accounts index (so it is
+  discoverable) and not tombstoned, accounts found under the keys of its stored display name
+  and bio (never its handle, host or URI), ranked by shared keys and score
+  (`social_index::related_accounts`); then authors of the week's trending posts, if their
+  account is indexed and not tombstoned. Never the asker; `language` filters as in
+  `account_search`; at most 20. An unknown asker gets trending authors only. Nothing is
+  fetched for the request.
+- Config: `trends_timeframe_minutes`, `trends_shares`, `trends_likes`, `trends_replies` (each
+  ≥ 1) and `trends_max_uris` (default 5000), each with an env override.
+- Tests: `fasp/tests/discovery.rs` (gating, options, shapes, signatures, 405s),
+  `fasp/tests/server.rs::trending_events_are_handed_over_only_from_a_trends_subscription`,
+  `fasp/tests/data_sharing.rs::on_enable_with_trends_adds_one_content_trends_subscription_with_the_threshold`,
+  `mwmbl_social/tests/discovery.rs` (end to end over signed FASP: trending events build the
+  state, a not-yet-indexed trending post is fetched and served, an unlisted one never is,
+  ranking, language, hashtags, a deleted post drops out, recommendations, 404s; and a
+  domain-blocked post and author still on their pages are not returned), and unit tests in
+  `mwmbl_social::trends`.
 
 Mwmbl integration is a separate track. It can start any time after Stage 1, once there is real
 content: an authenticated search API for Mwmbl, and a decision on merging and ranking.
@@ -986,7 +1080,8 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
 2. **Mastodon status:** answered from Mastodon `main` (2026-11-15):
    - Behind `EXPERIMENTAL_FEATURES=fasp`. The server side implements registration,
      `data_sharing` (event subscriptions create/destroy, backfill requests and continuations)
-     and the debug capability. It calls `account_search` and `follow_recommendation`.
+     and the debug capability. It calls `account_search` and `follow_recommendation`, and sends
+     `trending` events, but never calls `trends` (see Stage 4).
    - `account_search` is called as `GET /account_search/v0/search?term=...&limit=10`, with no
      `language`, and the body is read as a JSON array of actor URIs. `Link` pagination is
      ignored. Mastodon fetches each URI it doesn't already know.
@@ -1027,3 +1122,14 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
    gates our hosted instance and triggers `register`.
 6. **Index sizing defaults** for small self-hosters versus our instance, and whether to keep
    one posts index or shard it by time.
+7. **Trend input trust** (Stage 4): every `trending` event counts, pooled across
+   registrations, so one registered server could inflate a post's trend score. Registrations
+   are admin-approved, so this is accepted for now; per-registration caps or counting
+   distinct registrations are the options if it is abused.
+8. **Subscribing to trends events** (Stage 4): we subscribe with every `data_sharing`
+   registration, even when no registration has `trends` or `follow_recommendation` enabled,
+   because trend data is pooled. That costs fetches of trending posts we have not indexed
+   (queued as backfill). Should the subscription depend on some registration enabling a
+   trends consumer?
+9. **Trends end to end:** Mastodon never calls `trends`, so the endpoints are checked against
+   our fakes only. Which server will call them, and with which options?

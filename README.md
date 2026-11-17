@@ -9,6 +9,12 @@ It currently provides:
 - **`data_sharing`**: your server tells us about public posts and accounts, and we fetch and
   index them.
 - **`account_search`**: your server's account search can include results from us.
+- **`trends`**: trending posts and hashtags, from the `trending` events connected servers
+  send us, limited to posts we have indexed (see PLAN.md Stage 4 for how they are ranked).
+  Links are not reported. Mastodon does not query trends yet.
+- **`follow_recommendation`**: accounts to follow, related by the words of the asking
+  account's name and bio, then authors of trending posts. Mastodon shows these as follow
+  suggestions.
 - A JSON search API at `/api/v1/search/posts` and `/api/v1/search/accounts`, for testing.
 
 There is no end-user UI. In FASP the fediverse server is the UI. The design and the plan are
@@ -60,8 +66,8 @@ be served at the root of its host.
 2. Open the link (Mastodon: Administration > Fediverse Auxiliary Service Providers). Check that
    the fingerprint matches, then approve.
 3. On the same page, enable the capabilities you want: `data_sharing` to send us content, and
-   `account_search` to use our account search. Enabling `data_sharing` starts a backfill of
-   recent public content.
+   `account_search`, `trends` and `follow_recommendation` to use them. Enabling `data_sharing`
+   starts a backfill of recent public content and subscribes to trending events.
 
 `mwmbl-social registrations` lists registrations and `mwmbl-social unregister <id>` revokes
 one.
@@ -83,6 +89,8 @@ set from the environment as `MWMBL_SOCIAL_<FIELD>`, for example `MWMBL_SOCIAL_BA
 | `sweep_period_secs` | 6 days | One full revalidation pass over each index |
 | `fetch_concurrency` | 8 | |
 | `revalidate_interval_per_host_ms` | 1000 | Revalidation fetches to one host start at most once per this interval; the rest are rescheduled. 0 turns it off. Announcements and backfill are not limited by it |
+| `trends_timeframe_minutes`, `trends_shares`, `trends_likes`, `trends_replies` | 15, 3, 3, 3 | Threshold of our trends subscription: a server reports a post once it has this many shares, likes or replies within the timeframe |
+| `trends_max_uris` | 5000 | Most post URIs kept in the in-memory trend state (one week of hourly counts) |
 | `metrics` | `false` | Serve Prometheus text at `/metrics`. It is public, so firewall or proxy it |
 | `follow` | `[]` | Communities or accounts to follow, e.g. `["!rust@lemmy.example"]`; env: comma-separated |
 | `outbox_backfill_pages` | 5 | Outbox pages read when a follow is accepted; 0 turns it off |
