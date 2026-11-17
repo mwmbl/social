@@ -802,8 +802,12 @@ pub async fn register(
 /// next.
 #[must_use]
 pub fn registration_report(outcome: &RegistrationOutcome, our_base_url: &str) -> String {
+    let replaced = outcome
+        .replaced_registration_id
+        .map(|old| format!(" It replaces the revoked registration {old}."))
+        .unwrap_or_default();
     format!(
-        "Registered with {server} (registration {id}, pending approval).\n\n\
+        "Registered with {server} (registration {id}, pending approval).{replaced}\n\n\
          Key fingerprint: {fingerprint}\n\
          Approval link:   {link}\n\n\
          Next: open the approval link, compare the fingerprint shown there with the one above, \
@@ -1230,6 +1234,7 @@ mod tests {
                 fingerprint: "FINGERPRINT=".into(),
                 completion_uri: "https://m.example/admin/fasps/4".into(),
                 fasp_base_url: Url::parse("https://m.example/api/fasp")?,
+                replaced_registration_id: Some(3),
             },
             "https://social.example",
         );
@@ -1241,6 +1246,7 @@ mod tests {
             "approve",
             "enable the data_sharing capability",
             "https://social.example",
+            "replaces the revoked registration 3",
         ] {
             assert!(report.contains(needle), "{needle:?} missing from\n{report}");
         }

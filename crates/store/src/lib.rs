@@ -83,12 +83,22 @@ impl Store {
     fn init(conn: Connection, name: &str) -> Result<Self, StoreError> {
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(ctx(format!("set busy timeout on {name}")))?;
-        conn.pragma_update(None, "foreign_keys", true)
-            .map_err(ctx(format!("enable foreign keys on {name}")))?;
         conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
             .map_err(ctx(format!("enable WAL on {name}")))?;
         let store = Self { conn };
+        // Migrations run with foreign keys off, as SQLite's procedure for rebuilding a table
+        // requires (dropping a parent table would otherwise cascade to its children); each is
+        // checked with `foreign_key_check` before it commits. The bundled SQLite turns them on
+        // by default, and the pragma is ignored inside a transaction, so it is set here.
+        store
+            .conn
+            .pragma_update(None, "foreign_keys", false)
+            .map_err(ctx(format!("disable foreign keys for migrating {name}")))?;
         store.migrate(name)?;
+        store
+            .conn
+            .pragma_update(None, "foreign_keys", true)
+            .map_err(ctx(format!("enable foreign keys on {name}")))?;
         Ok(store)
     }
 
@@ -104,6 +114,17 @@ impl Store {
             let op = format!("migration {} on {name}", i + 1);
             let tx = self.conn.unchecked_transaction().map_err(ctx(op.clone()))?;
             tx.execute_batch(sql).map_err(ctx(op.clone()))?;
+            let violations: i64 = tx
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                    r.get(0)
+                })
+                .map_err(ctx(op.clone()))?;
+            if violations > 0 {
+                return Err(StoreError::ForeignKeys {
+                    operation: op,
+                    violations,
+                });
+            }
             // PRAGMA values cannot be bound; `i + 1` is a usize we produced.
             tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))
                 .map_err(ctx(op.clone()))?;
@@ -235,6 +256,64 @@ mod tests {
         let host = store.host("a.example")?.ok_or("missing host")?;
         assert_eq!(host.software.as_deref(), Some("lemmy"));
         assert_eq!(store.host_robots("a.example")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn registration_id_migration_keeps_rows_and_children() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("s.db");
+        {
+            // A database from before AUTOINCREMENT registration ids (migration 7).
+            let conn = Connection::open(&path)?;
+            for sql in schema::MIGRATIONS.iter().take(6) {
+                conn.execute_batch(sql)?;
+            }
+            conn.execute_batch("PRAGMA user_version = 6")?;
+            for (id, url) in [(1, "https://a.example"), (2, "https://b.example")] {
+                conn.execute(
+                    "INSERT INTO registrations
+                         (id, base_url, server_id, fasp_id, our_private_key, status, created_at)
+                     VALUES (?1, ?2, ?2, 'f', x'00', 'active', 1)",
+                    rusqlite::params![id, url],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO capabilities VALUES (2, 'data_sharing', 'v0', 1, 1)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO subscriptions
+                     (registration_id, remote_id, category, subscription_type, created_at)
+                 VALUES (2, 's1', 'content', 'lifecycle', 1)",
+                [],
+            )?;
+        }
+        let store = Store::open(&path)?;
+        assert_eq!(store.list_registrations()?.len(), 2);
+        assert!(store.capability_enabled(2, "data_sharing", "v0")?);
+        assert_eq!(store.list_subscriptions(2)?.len(), 1);
+        let fk_problems: i64 =
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                    r.get(0)
+                })?;
+        assert_eq!(fk_problems, 0);
+        // Children still cascade from the new table, and a deleted top id is not reused.
+        assert!(store.delete_registration(2)?);
+        assert!(!store.capability_enabled(2, "data_sharing", "v0")?);
+        assert_eq!(store.list_subscriptions(2)?.len(), 0);
+        let next = store.create_registration(registrations::NewRegistration {
+            base_url: "https://c.example".into(),
+            server_id: "sid-c".into(),
+            our_private_key: vec![0; 32],
+            created_at: 2,
+        })?;
+        assert_eq!(next.id, 3);
+        // Foreign keys are enforced again after migrating.
+        assert!(store.set_capability(99, "x", "v0", true, 1).is_err());
+        assert!(store.set_capability(next.id, "x", "v0", true, 1).is_ok());
         Ok(())
     }
 

@@ -70,7 +70,8 @@ be served at the root of its host.
    starts a backfill of recent public content and subscribes to trending events.
 
 `mwmbl-social registrations` lists registrations and `mwmbl-social unregister <id>` revokes
-one. To offer sign-up from your own site, use the [admin API](#admin-api) instead.
+one; `register` works again afterwards (on Mastodon, delete the old provider there first). To
+offer sign-up from your own site, use the [admin API](#admin-api) instead.
 
 ## Configuration
 
@@ -150,6 +151,9 @@ curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 - 400 for an unusable URL (`https` only), 409 (with the existing `id`) if the server is already
   registered, 502 if it can't be reached or doesn't accept the registration, 422 for any other
   body.
+- A revoked registration doesn't block a new one: registering the server again replaces it with
+  a new `id`, key and fingerprint, and the response carries `replaces` with the old `id`. On
+  Mastodon, the admin must first delete the old provider, or the server refuses (502).
 - `GET /api/v1/admin/registrations` lists registrations, `GET .../{id}` shows one (its `status`
   becomes `active` once the server first calls us), and `DELETE .../{id}` revokes it. Unknown
   ids get 404.

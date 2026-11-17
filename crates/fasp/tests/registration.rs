@@ -249,6 +249,82 @@ async fn failed_registration_leaves_no_row_and_can_be_retried() {
 }
 
 #[tokio::test]
+async fn a_revoked_or_abandoned_registration_is_replaced() {
+    let m = FakeMastodon::start().await;
+    let ours = start_ours(default_info(), Vec::new()).await;
+    let our_url = Url::parse(&ours.base_url).unwrap();
+    let register_now = async |now: i64| {
+        register(&ours.http, &*ours.state, "n", &our_url, &m.url(), None, now).await
+    };
+    let rows = || {
+        ours.state
+            .store
+            .lock()
+            .unwrap()
+            .list_registrations()
+            .unwrap()
+    };
+
+    let first = register_now(now()).await.unwrap();
+    assert_eq!(first.replaced_registration_id, None);
+    let first_server_id = m.inner.registered.lock().unwrap().clone().unwrap()["serverId"].clone();
+    let first_row = rows().into_iter().next().unwrap();
+
+    // Revoked: registering again replaces it with a new key and serverId.
+    ours.state
+        .store
+        .lock()
+        .unwrap()
+        .set_registration_status(first.registration_id, RegistrationStatus::Revoked)
+        .unwrap();
+    let second = register_now(now()).await.unwrap();
+    assert_ne!(second.registration_id, first.registration_id);
+    assert_eq!(second.replaced_registration_id, Some(first.registration_id));
+    assert_ne!(second.fingerprint, first.fingerprint);
+    let after = rows();
+    assert_eq!(after.len(), 1);
+    let second_row = after.into_iter().next().unwrap();
+    assert_eq!(second_row.id, second.registration_id);
+    assert_eq!(second_row.status, RegistrationStatus::Pending);
+    assert_ne!(second_row.server_id, first_row.server_id);
+    assert_ne!(second_row.our_private_key, first_row.our_private_key);
+    assert_ne!(
+        m.inner.registered.lock().unwrap().clone().unwrap()["serverId"],
+        first_server_id
+    );
+
+    // Live, pending the admin's approval: refused, naming it.
+    let err = register_now(now()).await.unwrap_err();
+    assert!(
+        matches!(err, RegistrationError::AlreadyRegistered { registration_id, .. }
+            if registration_id == second.registration_id),
+        "{err}"
+    );
+
+    // A pending row with no faspId, from an attempt a crash interrupted: replaced once it is
+    // old enough not to be an attempt still in flight.
+    let stale = {
+        let store = ours.state.store.lock().unwrap();
+        store.delete_registration(second.registration_id).unwrap();
+        store
+            .create_registration(store::NewRegistration {
+                base_url: second_row.base_url.clone(),
+                server_id: "interrupted".into(),
+                our_private_key: vec![9; 32],
+                created_at: 1000,
+            })
+            .unwrap()
+    };
+    assert!(matches!(
+        register_now(1010).await,
+        Err(RegistrationError::AlreadyRegistered { .. })
+    ));
+    let third = register_now(1000 + 3600).await.unwrap();
+    assert_eq!(third.replaced_registration_id, Some(stale.id));
+    assert_eq!(rows().len(), 1);
+}
+
+#[tokio::test]
 async fn override_is_used_for_the_registration_call() {
     let m = FakeMastodon::start().await;
     let ours = start_ours(default_info(), Vec::new()).await;

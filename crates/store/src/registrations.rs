@@ -104,6 +104,33 @@ impl Store {
         })
     }
 
+    /// Deletes registration `old_id` (and, by cascade, its capabilities, subscriptions and
+    /// backfills) and inserts `new` in its place, in one transaction: the old row's `base_url`
+    /// is unique, so it has to go first. Used to register a server again after its
+    /// registration was revoked. The old key and `serverId` go with the row; `new` brings its
+    /// own. Fails with [`StoreError::NotFound`] if `old_id` is gone, so a race with another
+    /// attempt doesn't delete a registration it didn't look at.
+    pub fn replace_registration(
+        &self,
+        old_id: i64,
+        new: NewRegistration,
+    ) -> Result<Registration, StoreError> {
+        let op = format!(
+            "replace registration {old_id} for {} with a new one",
+            new.base_url
+        );
+        let tx = self.conn.unchecked_transaction().map_err(ctx(op.clone()))?;
+        let changed = tx
+            .execute("DELETE FROM registrations WHERE id = ?1", [old_id])
+            .map_err(ctx(op.clone()))?;
+        expect_changed(changed, "replace registration", || {
+            format!("registration {old_id}")
+        })?;
+        let registration = self.create_registration(new)?;
+        tx.commit().map_err(ctx(op))?;
+        Ok(registration)
+    }
+
     pub fn registration(&self, id: i64) -> Result<Option<Registration>, StoreError> {
         self.conn
             .query_row(
@@ -366,6 +393,28 @@ mod tests {
         assert!(!s.delete_registration(r.id)?);
         assert_eq!(s.registration(r.id)?, None);
         assert!(!s.capability_enabled(r.id, "data_sharing", "0.1")?);
+        Ok(())
+    }
+
+    #[test]
+    fn replace_registration_swaps_the_row() -> TestResult {
+        let s = Store::open_in_memory()?;
+        let old = s.create_registration(new("https://a.example", "sid-a"))?;
+        s.set_capability(old.id, "data_sharing", "0.1", true, 1)?;
+        s.set_registration_status(old.id, RegistrationStatus::Revoked)?;
+        let mut replacement = new("https://a.example", "sid-b");
+        replacement.our_private_key = vec![0xCD; 32];
+        let r = s.replace_registration(old.id, replacement)?;
+        assert_ne!(r.id, old.id);
+        assert_eq!(r.status, RegistrationStatus::Pending);
+        assert_eq!(s.registration(old.id)?, None);
+        assert_eq!(s.registration_by_server_id("sid-a")?, None);
+        assert!(!s.capability_enabled(old.id, "data_sharing", "0.1")?);
+        assert_eq!(s.list_registrations()?, vec![r.clone()]);
+        // A vanished old row fails and inserts nothing.
+        let gone = s.replace_registration(old.id, new("https://a.example", "sid-c"));
+        assert!(matches!(gone, Err(StoreError::NotFound { .. })));
+        assert_eq!(s.list_registrations()?, vec![r]);
         Ok(())
     }
 

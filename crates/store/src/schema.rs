@@ -164,4 +164,28 @@ CREATE INDEX fetch_queue_due ON fetch_queue(priority, not_before, enqueued_at);
 ALTER TABLE hosts ADD COLUMN robots_txt TEXT;
 ALTER TABLE hosts ADD COLUMN robots_checked_at INTEGER;
 ",
+    "
+-- Registration ids are never reused (AUTOINCREMENT). Registering a server again after its
+-- registration was revoked deletes the revoked row (`base_url` stays unique), and an operator's
+-- UI keeps ids, so a plain rowid could hand a deleted registration's id to another server.
+-- The table is rebuilt; migrations run with foreign keys off, so dropping the old table leaves
+-- the child tables' rows alone, and their references name `registrations`, the new table.
+CREATE TABLE registrations_new (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    base_url         TEXT NOT NULL UNIQUE,
+    server_id        TEXT NOT NULL UNIQUE,
+    fasp_id          TEXT,
+    our_private_key  BLOB NOT NULL,
+    their_public_key BLOB,
+    status           TEXT NOT NULL CHECK (status IN ('pending','active','revoked')),
+    created_at       INTEGER NOT NULL
+);
+INSERT INTO registrations_new
+    (id, base_url, server_id, fasp_id, our_private_key, their_public_key, status, created_at)
+SELECT id, base_url, server_id, fasp_id, our_private_key, their_public_key, status, created_at
+FROM registrations ORDER BY id;
+DROP TABLE registrations;
+ALTER TABLE registrations_new RENAME TO registrations;
+CREATE INDEX registrations_fasp_id ON registrations(fasp_id);
+",
 ];

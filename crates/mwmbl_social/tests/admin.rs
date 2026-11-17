@@ -221,3 +221,68 @@ async fn registers_lists_gets_and_revokes() {
 
     server.stop().await;
 }
+
+#[tokio::test]
+async fn a_revoked_server_can_register_again() {
+    let fake = FakeMastodon::start().await;
+    let server = Server::start(&[TOKEN]).await;
+    let register = json!({"server_url": fake.origin});
+
+    let (status, first) = server
+        .call("POST", REGISTRATIONS, Some(TOKEN), Some(&register))
+        .await;
+    assert_eq!(status, 201, "{first}");
+    let first_id = first["id"].as_i64().unwrap();
+    let first_server_id = fake.registered()["serverId"].clone();
+    let first_item = format!("{REGISTRATIONS}/{first_id}");
+
+    // Revoke, then register again: a new registration, with a new key and serverId.
+    let (status, revoked) = server.call("DELETE", &first_item, Some(TOKEN), None).await;
+    assert_eq!(status, 200, "{revoked}");
+    let (status, second) = server
+        .call("POST", REGISTRATIONS, Some(TOKEN), Some(&register))
+        .await;
+    assert_eq!(status, 201, "{second}");
+    let second_id = second["id"].as_i64().unwrap();
+    assert_ne!(second_id, first_id);
+    assert_eq!(second["status"], "pending");
+    assert_eq!(second["replaces"], first_id);
+    assert_ne!(second["fingerprint"], first["fingerprint"]);
+    let our_key =
+        Ed25519VerifyingKey::from_base64(fake.registered()["publicKey"].as_str().unwrap()).unwrap();
+    assert_eq!(second["fingerprint"], our_key.fingerprint());
+    assert_ne!(fake.registered()["serverId"], first_server_id);
+    assert_eq!(second["approval_url"], fake.url("/admin/fasps"));
+
+    // The revoked row is gone; only the new one is listed.
+    assert_eq!(
+        server.call("GET", &first_item, Some(TOKEN), None).await.0,
+        404
+    );
+    let (_, list) = server.call("GET", REGISTRATIONS, Some(TOKEN), None).await;
+    let ids: Vec<i64> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![second_id]);
+
+    // The new registration works: the server's signed request with the new serverId verifies.
+    assert_eq!(
+        fake.call_ours("GET", "/provider_info", b"").await.status,
+        200
+    );
+    let item = format!("{REGISTRATIONS}/{second_id}");
+    let (_, now) = server.call("GET", &item, Some(TOKEN), None).await;
+    assert_eq!(now["status"], "active");
+
+    // A live registration still blocks a duplicate.
+    let (status, body) = server
+        .call("POST", REGISTRATIONS, Some(TOKEN), Some(&register))
+        .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["id"], second_id);
+
+    server.stop().await;
+}

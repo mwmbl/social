@@ -8,7 +8,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use store::NewRegistration;
+use store::{NewRegistration, Registration, RegistrationStatus};
 use url::Url;
 
 use crate::StoreAccess;
@@ -18,6 +18,9 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Random bytes in a generated `serverId`: 18 bytes are 24 url-safe characters.
 const SERVER_ID_BYTES: usize = 18;
+/// How old a `pending` registration with no `faspId` must be before it counts as an abandoned
+/// attempt rather than one still in flight: well past [`REQUEST_TIMEOUT`].
+const ABANDONED_ATTEMPT_SECS: i64 = 10 * 60;
 
 /// What a successful [`register`] gives the admin.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +32,27 @@ pub struct RegistrationOutcome {
     pub completion_uri: String,
     /// The FASP base URL that was used (and is stored as the registration's `base_url`).
     pub fasp_base_url: Url,
+    /// The dead registration for the same server that this one replaced, if any.
+    pub replaced_registration_id: Option<i64>,
+}
+
+/// Whether `existing`, a registration for the same FASP base URL, stops a new one at `now`.
+///
+/// Only a live registration does: an `active` one, or a `pending` one that the server has
+/// answered (it waits for the admin's approval there). A `revoked` one doesn't, and neither
+/// does a `pending` one with no `faspId` that is older than [`ABANDONED_ATTEMPT_SECS`]: a failed
+/// attempt removes its own row, so that is one interrupted by a crash, and it can never become
+/// active because we never got the server's key.
+#[must_use]
+pub fn blocks_new_registration(existing: &Registration, now: i64) -> bool {
+    match existing.status {
+        RegistrationStatus::Active => true,
+        RegistrationStatus::Revoked => false,
+        RegistrationStatus::Pending => {
+            existing.fasp_id.is_some()
+                || existing.created_at >= now.saturating_sub(ABANDONED_ATTEMPT_SECS)
+        }
+    }
 }
 
 fn invalid_url(url: &Url, reason: &str) -> RegistrationError {
@@ -191,17 +215,8 @@ pub async fn register<S: StoreAccess>(
         base_url: base_url.clone(),
         source,
     };
-    let existing = store
-        .with_store(store::Store::list_registrations)?
-        .into_iter()
-        .find(|r| r.base_url == base_url);
-    if let Some(existing) = existing {
-        return Err(RegistrationError::AlreadyRegistered {
-            base_url,
-            registration_id: existing.id,
-        });
-    }
-
+    // Every registration gets a fresh key and `serverId`, a re-registration too: the old ones
+    // go with the row they replace.
     let key = Ed25519SigningKey::generate().map_err(key_error)?;
     let public_key = key.verifying_key();
     let server_id = random_server_id().map_err(|e| {
@@ -210,14 +225,33 @@ pub async fn register<S: StoreAccess>(
             reason: e.to_string(),
         })
     })?;
-    let registration = store.with_store(|s| {
-        s.create_registration(NewRegistration {
-            base_url: base_url.clone(),
-            server_id: server_id.clone(),
-            our_private_key: key.to_seed().to_vec(),
-            created_at: now,
-        })
+    let new = NewRegistration {
+        base_url: base_url.clone(),
+        server_id: server_id.clone(),
+        our_private_key: key.to_seed().to_vec(),
+        created_at: now,
+    };
+    // The check and the insert share one store access, so nothing slips in between.
+    let (registration, replaced_registration_id) = store.with_store(|s| {
+        let existing = s
+            .list_registrations()?
+            .into_iter()
+            .find(|r| r.base_url == base_url);
+        match existing {
+            Some(existing) if blocks_new_registration(&existing, now) => {
+                Err(RegistrationError::AlreadyRegistered {
+                    base_url: base_url.clone(),
+                    registration_id: existing.id,
+                })
+            }
+            Some(existing) => Ok((s.replace_registration(existing.id, new)?, Some(existing.id))),
+            None => Ok((s.create_registration(new)?, None)),
+        }
     })?;
+    if let Some(old) = replaced_registration_id {
+        tracing::info!(registration = registration.id, replaced = old, base_url = %base_url,
+            "replacing a revoked or abandoned registration");
+    }
 
     let exchange = Exchange {
         registration_id: registration.id,
@@ -234,6 +268,7 @@ pub async fn register<S: StoreAccess>(
             fingerprint: public_key.fingerprint(),
             completion_uri,
             fasp_base_url,
+            replaced_registration_id,
         }),
         Err(e) => {
             if let Err(cleanup) = store.with_store(|s| s.delete_registration(registration.id)) {
@@ -332,5 +367,48 @@ mod tests {
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         );
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn only_live_registrations_block_a_new_one() {
+        let now = 100_000;
+        let registration = |status, fasp_id: Option<&str>, created_at| Registration {
+            id: 1,
+            base_url: "https://m.example/api/fasp".into(),
+            server_id: "sid".into(),
+            fasp_id: fasp_id.map(str::to_owned),
+            our_private_key: vec![0; 32],
+            their_public_key: fasp_id.map(|_| vec![1; 32]),
+            status,
+            created_at,
+        };
+        let old = now - ABANDONED_ATTEMPT_SECS - 1;
+        let recent = now - 5;
+        let cases = [
+            (RegistrationStatus::Active, Some("f"), old, true),
+            (RegistrationStatus::Active, Some("f"), recent, true),
+            // Waiting for the admin's approval on the server.
+            (RegistrationStatus::Pending, Some("f"), old, true),
+            (RegistrationStatus::Pending, Some("f"), recent, true),
+            // An attempt still in flight.
+            (RegistrationStatus::Pending, None, recent, true),
+            (
+                RegistrationStatus::Pending,
+                None,
+                now - ABANDONED_ATTEMPT_SECS,
+                true,
+            ),
+            // An attempt a crash interrupted.
+            (RegistrationStatus::Pending, None, old, false),
+            (RegistrationStatus::Revoked, Some("f"), recent, false),
+            (RegistrationStatus::Revoked, None, old, false),
+        ];
+        for (status, fasp_id, created_at, blocks) in cases {
+            assert_eq!(
+                blocks_new_registration(&registration(status, fasp_id, created_at), now),
+                blocks,
+                "{status:?} fasp_id={fasp_id:?} created_at={created_at}"
+            );
+        }
     }
 }

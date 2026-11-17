@@ -220,7 +220,13 @@ explicit user and admin actions.
   calls, and it is not always the server's own URL, e.g. Mastodon's is `<server>/api/fasp`),
   `serverId` (ours), `faspId` (theirs), our Ed25519 keypair, their public key, status
   (pending/active/revoked), created_at. A registration becomes `active` on the first request
-  from that server that verifies; the spec gives us no approval callback.
+  from that server that verifies; the spec gives us no approval callback. Ids are
+  `AUTOINCREMENT`, never reused. `base_url` is unique, so registering a server again replaces
+  a dead row for it (revoked, or a `pending` one with no `faspId` that is over 10 minutes old:
+  an attempt a crash interrupted) in one transaction, cascading to its children; the new row
+  has a new id, key and `serverId`. Only a live registration (active, or pending once the
+  server has answered) blocks a new one. Migrations run with foreign keys off and are checked
+  with `foreign_key_check` before they commit, as SQLite's table-rebuild procedure needs.
 - **`capabilities`**: registration_id, capability id, version, enabled, updated_at.
 - **`subscriptions`**: registration_id, remote subscription id, category, type, created_at.
 - **`backfills`**: registration_id, remote id, category, state, more_available.
@@ -588,8 +594,9 @@ removes it.
   `allow_http`, without user info), `registrations` (JSON with our key's fingerprint, never
   keys),
   `unregister <id>` (marks revoked, disables its capabilities, deletes its subscription and
-  backfill rows; no remote call; its requests get 401). `stats` reports registrations by status
-  and enabled capabilities.
+  backfill rows; no remote call; its requests get 401). `register` again after `unregister`
+  replaces the revoked registration (see `registrations` above). `stats` reports registrations
+  by status and enabled capabilities.
 - `/metrics` (Prometheus text, hand-written) is served on the main listener only when the
   `metrics` config is true. It is unauthenticated, so firewall it or proxy it to an internal
   address. It reports queue depth (total and by reason), tombstones by kind, domain blocks,
@@ -1071,8 +1078,13 @@ Consent is the lead message: the fediverse has rejected search projects before.
   - `GET` lists, and `GET`/`DELETE .../{id}` read or revoke one (404 if unknown), with the same
     fields minus `approval_url`: the server sends that link once, and it is not stored, so the
     operator's UI keeps it.
-  - A revoked registration still counts as "already registered" (409), as for `register`:
-    re-registering a server after `DELETE` needs its row removed first. Not solved yet.
+  - Disconnect and reconnect: `POST` after `DELETE` registers the server again, as `register`
+    does after `unregister`. The revoked row (with its key, capabilities and subscriptions) is
+    replaced by a new registration with a new `id`, key, fingerprint and `serverId`, and the
+    201 carries `replaces` with the old `id`, which then gets 404. Only a live registration
+    (active, or pending the admin's approval) gets 409. Mastodon refuses a second provider
+    for the same base URL until its admin deletes the old one, so the operator's UI should
+    say so on disconnect; until then reconnecting gets 502.
 
 **Hosted sign-up (in Mwmbl).** A logged-in Mwmbl user enters their server's URL; Mwmbl
 rate-limits per user and per target host, then calls the admin API and shows the fingerprint and

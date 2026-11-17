@@ -134,7 +134,8 @@ pub fn get_registration(store: &Store, id: i64) -> Result<Option<Value>, StoreEr
 
 /// What a successful registration reports: the registration as [`registration_json`] plus
 /// `approval_url`, the server's `registrationCompletionUri`, where the admin compares the
-/// fingerprint and approves. The server gives it only once, so it is not stored.
+/// fingerprint and approves. The server gives it only once, so it is not stored. When the new
+/// registration replaced a revoked one for the same server, `replaces` is the old `id`.
 pub fn registered_json(store: &Store, outcome: &RegistrationOutcome) -> Result<Value, StoreError> {
     let mut value = get_registration(store, outcome.registration_id)?.unwrap_or_else(|| {
         json!({
@@ -145,6 +146,9 @@ pub fn registered_json(store: &Store, outcome: &RegistrationOutcome) -> Result<V
     if let Some(object) = value.as_object_mut() {
         object.insert("fingerprint".to_owned(), json!(outcome.fingerprint));
         object.insert("approval_url".to_owned(), json!(outcome.completion_uri));
+        if let Some(old) = outcome.replaced_registration_id {
+            object.insert("replaces".to_owned(), json!(old));
+        }
     }
     Ok(value)
 }

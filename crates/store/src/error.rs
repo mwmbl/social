@@ -25,6 +25,9 @@ pub enum StoreError {
     /// The database was written by a newer version of this program.
     #[error("database schema version {found} is newer than supported version {supported}")]
     SchemaTooNew { found: usize, supported: usize },
+    /// A migration left rows whose foreign keys point nowhere; it was rolled back.
+    #[error("{operation}: {violations} foreign key violation(s)")]
+    ForeignKeys { operation: String, violations: i64 },
     /// A value was outside the range the database can hold.
     #[error("{operation}: value out of range ({detail})")]
     OutOfRange {
