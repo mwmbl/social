@@ -100,6 +100,7 @@ async fn registers_activates_ingests_deletes_and_stops() {
         posts_pages: 64,
         accounts_pages: 64,
         allow_http: true,
+        allow_private_addresses: true,
         metrics: true,
         backfill_max_count: 5,
         privacy_policy_url: Some("https://social.example/privacy".to_string()),

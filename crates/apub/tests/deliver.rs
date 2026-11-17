@@ -128,6 +128,7 @@ fn fetcher() -> Fetcher {
         "mwmbl-social-test".to_owned(),
     );
     config.allow_http = true;
+    config.allow_private_addresses = true;
     config.min_interval_per_host = Duration::ZERO;
     Fetcher::new(config).unwrap()
 }

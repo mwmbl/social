@@ -104,6 +104,10 @@ pub struct Config {
     pub admin_tokens: Tokens,
     /// Allow `http://` URIs. For tests only.
     pub allow_http: bool,
+    /// Allow outbound requests to loopback, private, link-local and other non-public addresses
+    /// (see `apub::net`). Off, they are refused, so nobody can make us reach services behind
+    /// our firewall. For tests and the Docker dev setups only.
+    pub allow_private_addresses: bool,
 }
 
 /// The shortest bearer token accepted (`crawl_tokens`, `admin_tokens`).
@@ -177,6 +181,7 @@ impl Default for Config {
             crawl_tokens: Tokens::default(),
             admin_tokens: Tokens::default(),
             allow_http: false,
+            allow_private_addresses: false,
         }
     }
 }
@@ -310,6 +315,7 @@ impl Config {
             outbox_backfill_pages,
             metrics,
             allow_http,
+            allow_private_addresses,
         );
         let list = |name: &str| {
             env(&format!("{ENV_PREFIX}{name}")).map(|value| {
@@ -485,6 +491,7 @@ mod tests {
         assert_eq!(config.max_transient_attempts, 10);
         assert_eq!(config.revalidate_interval_per_host_ms, 1000);
         assert!(!config.allow_http);
+        assert!(!config.allow_private_addresses);
         assert_eq!(config.privacy_policy_language, "en");
         assert_eq!(config.fediverse_account, None);
         assert_eq!(config.sign_in_url, None);
@@ -516,6 +523,7 @@ mod tests {
             posts_pages = 128
             contact_email = "admin@social.example"
             allow_http = true
+            allow_private_addresses = true
             key_bigrams = 3
             privacy_policy_url = "https://social.example/privacy"
             privacy_policy_language = "de"
@@ -543,6 +551,7 @@ mod tests {
             Some("admin@social.example")
         );
         assert!(config.allow_http);
+        assert!(config.allow_private_addresses);
         assert_eq!(config.key_scheme().config.bigrams, 3);
         assert_eq!(config.privacy_policy_language, "de");
         assert_eq!(
@@ -595,6 +604,7 @@ mod tests {
                 ("MWMBL_SOCIAL_POSTS_PAGES", "256"),
                 ("MWMBL_SOCIAL_BASE_URL", "https://x.example"),
                 ("MWMBL_SOCIAL_ALLOW_HTTP", "true"),
+                ("MWMBL_SOCIAL_ALLOW_PRIVATE_ADDRESSES", "true"),
                 ("MWMBL_SOCIAL_DATA_DIR", "/tmp/d"),
                 ("MWMBL_SOCIAL_SWEEP_PERIOD_SECS", "60"),
                 ("MWMBL_SOCIAL_CONTACT_EMAIL", "a@b.example"),
@@ -640,6 +650,7 @@ mod tests {
         assert_eq!(config.listen, "1.2.3.4:1");
         assert_eq!(config.base_url.as_deref(), Some("https://x.example"));
         assert!(config.allow_http);
+        assert!(config.allow_private_addresses);
         assert_eq!(config.data_dir, PathBuf::from("/tmp/d"));
         assert_eq!(config.sweep_period_secs, 60);
         assert_eq!(config.contact_email.as_deref(), Some("a@b.example"));

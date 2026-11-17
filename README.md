@@ -103,6 +103,7 @@ set from the environment as `MWMBL_SOCIAL_<FIELD>`, for example `MWMBL_SOCIAL_BA
 | `outbox_backfill_pages` | 5 | Outbox pages read when a follow is accepted; 0 turns it off |
 | `crawl_tokens` | `[]` | Bearer tokens for crawl submissions (at least 16 characters each); none turns the endpoint off. Env: comma-separated |
 | `admin_tokens` | `[]` | Bearer tokens for the admin API, as for `crawl_tokens`; none turns it off. Env: comma-separated |
+| `allow_private_addresses` | `false` | Allow outbound requests to loopback, private, link-local and other non-public addresses. Off, a host that resolves only to such addresses (or is one) is refused, so nobody can make us reach services behind your firewall. For tests and the Docker dev setups only |
 
 ## Following communities
 

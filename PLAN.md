@@ -149,7 +149,8 @@ crates/
                 `software.name` (`apub::nodeinfo`, through `Fetcher::fetch_document`: same
                 limits, no id/origin check), signed delivery (`Fetcher::deliver`: POST under
                 the same limits, no redirects), inbox signature and key-owner checks
-                (`apub::inbox`), consent evaluation
+                (`apub::inbox`), the outbound address policy and the shared HTTP client
+                builder (`apub::net`, see Outbound requests below), consent evaluation
                 (`apub::signatures`: framework-agnostic, operating on a method, a target URI,
                 a header lookup and a status. Fixed component set; RFC 9421 signs ed25519 and
                 rsa-v1_5-sha256 and also verifies rsa-pss-sha512; cavage-12 is RSA-SHA256 only,
@@ -207,6 +208,33 @@ larger one.
 needs it. A self-hosted install is just one row. A search request's results are not limited to
 the calling server's own data. A FASP pools what every connected server shares, and that pooling
 is the point.
+
+### Outbound requests
+
+Every host we contact is chosen by someone else: a server being registered (and the FASP base
+URL its nodeinfo names), announced and crawl-submitted URIs, followed actors, actor keys for
+inbox signature checks, inboxes we deliver to. So no outbound request may reach a non-public
+address (SSRF): loopback, private (RFC 1918), CGNAT, link-local (with the 169.254.169.254
+metadata address), unspecified, multicast, documentation, benchmarking and reserved IPv4;
+anything outside IPv6 global unicast, unique-local and link-local included; and IPv6 forms that
+carry one of those IPv4 addresses (mapped, compatible, NAT64, 6to4). `apub::net` holds the one
+policy (`is_public`, table-tested):
+
+- Every HTTP client is built from `apub::net::client_builder`, which installs a resolver that
+  uses the system resolver and drops non-public addresses, failing when none remain. The check
+  is on the addresses the connection is made to, so DNS rebinding can't get between a check and
+  the connect. Redirects to non-public IP literals are refused.
+- `reqwest` connects to an IP-literal host without resolving it, so `apub::net::check_url`
+  refuses those where URLs are accepted: `Fetcher` (every fetch and delivery), registration
+  (the server URL, `--fasp-base-url` and the discovered FASP base URL, checked before
+  `register` sends anything there) and the `forget` WebFinger lookup.
+- A refused request is an error naming the host (`FetchError::NotPublic`, a 400 from the admin
+  API); the fetcher starts no backoff for it, since nothing was sent.
+- `allow_private_addresses` (default `false`) turns all of it off, for tests (the in-process
+  fakes listen on 127.0.0.1) and the Docker dev setups (private networks). Like `allow_http`,
+  it is never for production.
+- An HTTP proxy from the environment (`HTTPS_PROXY`) resolves names itself, so the filter then
+  sees only the proxy's address; enforce the policy at such a proxy.
 
 ### Data model (SQLite)
 

@@ -245,6 +245,7 @@ fn config() -> FetcherConfig {
         user_agent("https://social.example/"),
     );
     config.allow_http = true;
+    config.allow_private_addresses = true;
     config.min_interval_per_host = Duration::ZERO;
     config.timeout = Duration::from_secs(10);
     config
@@ -834,5 +835,57 @@ async fn a_guard_sees_each_redirect_target_before_it_is_requested() {
             .fetch_guarded(&h.url("/redirect-away"), &never)
             .await,
         FetchOutcome::Error(FetchError::CrossHostRedirect { .. })
+    ));
+}
+
+#[tokio::test]
+async fn private_addresses_are_refused_unless_allowed() {
+    let h = harness(Accepts::Either).await;
+    let port = h.host().rsplit(':').next().unwrap().to_owned();
+    let mut strict = config();
+    strict.allow_private_addresses = false;
+    let strict = Fetcher::new(strict).unwrap();
+
+    // A name that resolves to loopback is refused at connect time, and the error says which
+    // host. Nothing reaches the fake.
+    let by_name = format!("http://localhost:{port}/obj/1");
+    match strict.fetch(&by_name).await {
+        FetchOutcome::Error(e @ FetchError::NotPublic { .. }) => {
+            let message = e.to_string();
+            assert!(message.contains("`localhost`"), "{message}");
+            assert!(message.contains("non-public"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // Not the host's fault: no backoff.
+    assert!(matches!(
+        strict.fetch(&by_name).await,
+        FetchOutcome::Error(FetchError::NotPublic { .. })
+    ));
+    // An IP literal is refused before anything is sent, and so is a delivery.
+    let literal = h.url("/obj/1");
+    match strict.fetch(&literal).await {
+        FetchOutcome::Error(e @ FetchError::NotPublic { .. }) => {
+            assert!(e.to_string().contains("`127.0.0.1`"), "{e}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        strict.deliver(&literal, b"{}").await,
+        apub::fetch::DeliveryOutcome::Error(FetchError::NotPublic { .. })
+    ));
+    assert!(matches!(
+        strict
+            .fetch("https://[::ffff:169.254.169.254]/latest")
+            .await,
+        FetchOutcome::Error(FetchError::NotPublic { .. })
+    ));
+    assert_eq!(h.fake.total.load(Ordering::SeqCst), 0);
+
+    // With the option set (as in every other test here), the same name is fetched.
+    let allowed = Fetcher::new(config()).unwrap();
+    assert!(matches!(
+        allowed.fetch(&by_name).await,
+        FetchOutcome::Found { .. }
     ));
 }

@@ -220,6 +220,7 @@ fn build_fetcher(
 ) -> anyhow::Result<Fetcher> {
     let mut fetcher = FetcherConfig::new(server_actor_key_id(base_url), key, user_agent(base_url));
     fetcher.allow_http = config.allow_http;
+    fetcher.allow_private_addresses = config.allow_private_addresses;
     Fetcher::new(fetcher).context("failed to build the ActivityPub fetch client")
 }
 
@@ -374,7 +375,7 @@ async fn serve_with_lock(
 
     let fasp = FaspApp::new(
         open_store(&config)?,
-        http_client(&base_url)?,
+        http_client(&config, &base_url)?,
         &config,
         &base_url,
         (posts.clone(), accounts.clone()),
@@ -493,9 +494,10 @@ fn follow_settings(config: &Config) -> anyhow::Result<FollowSettings> {
     })
 }
 
-/// The HTTP client for our own calls to servers' FASP APIs and registration.
-fn http_client(base_url: &str) -> anyhow::Result<reqwest::Client> {
-    reqwest::Client::builder()
+/// The HTTP client for our own calls to servers' FASP APIs and registration. Like every
+/// outbound client, it refuses non-public addresses unless `allow_private_addresses`.
+fn http_client(config: &Config, base_url: &str) -> anyhow::Result<reqwest::Client> {
+    apub::net::client_builder(config.allow_private_addresses)
         .user_agent(user_agent(base_url))
         .timeout(Duration::from_secs(30))
         .build()
@@ -708,13 +710,14 @@ async fn resolve_acct(config: &Config, user: &str, host: &str) -> anyhow::Result
     let scheme = if config.allow_http { "http" } else { "https" };
     let mut url = Url::parse(&format!("{scheme}://{host}/.well-known/webfinger"))
         .with_context(|| format!("{host:?} is not a valid host"))?;
+    apub::net::check_url(&url, config.allow_private_addresses)?;
     url.query_pairs_mut()
         .append_pair("resource", &format!("acct:{user}@{host}"));
     let agent = config
         .base_url
         .as_deref()
         .map_or_else(|| "mwmbl-social".to_string(), user_agent);
-    let client = reqwest::Client::builder()
+    let client = apub::net::client_builder(config.allow_private_addresses)
         .user_agent(agent)
         .timeout(Duration::from_secs(20))
         .build()
@@ -792,7 +795,7 @@ pub async fn register(
     fasp_base_url: Option<&str>,
 ) -> anyhow::Result<RegistrationOutcome> {
     let store = std::sync::Mutex::new(open_store(config)?);
-    let http = http_client(config.require_base_url()?)?;
+    let http = http_client(config, config.require_base_url()?)?;
     registrations::register_server(&http, &store, config, server_url, fasp_base_url, now_secs())
         .await
         .with_context(|| format!("failed to register with {server_url}"))

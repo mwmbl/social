@@ -238,6 +238,7 @@ impl Ours {
             posts_pages: 64,
             accounts_pages: 64,
             allow_http: true,
+            allow_private_addresses: true,
             ..Config::default()
         };
         configure(&mut config);

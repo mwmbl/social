@@ -164,6 +164,11 @@ impl FakeMastodon {
         self.inner.failures.lock().unwrap().clone()
     }
 
+    /// Whether a registration was ever received.
+    pub fn was_registered(&self) -> bool {
+        self.inner.registered.lock().unwrap().is_some()
+    }
+
     pub fn registered(&self) -> Value {
         self.inner.registered.lock().unwrap().clone().unwrap()
     }

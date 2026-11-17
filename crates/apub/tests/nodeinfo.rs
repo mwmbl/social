@@ -68,6 +68,7 @@ fn fetcher() -> Fetcher {
         user_agent("https://social.example/"),
     );
     config.allow_http = true;
+    config.allow_private_addresses = true;
     config.min_interval_per_host = Duration::ZERO;
     config.timeout = Duration::from_secs(10);
     Fetcher::new(config).unwrap()

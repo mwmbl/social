@@ -23,6 +23,10 @@ struct Server {
 
 impl Server {
     async fn start(admin_tokens: &[&str]) -> Self {
+        Self::start_with(admin_tokens, true).await
+    }
+
+    async fn start_with(admin_tokens: &[&str], allow_private_addresses: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -33,6 +37,7 @@ impl Server {
             posts_pages: 16,
             accounts_pages: 16,
             allow_http: true,
+            allow_private_addresses,
             admin_tokens: Tokens(admin_tokens.iter().map(|t| (*t).to_owned()).collect()),
             ..Config::default()
         };
@@ -284,5 +289,38 @@ async fn a_revoked_server_can_register_again() {
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["id"], second_id);
 
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn registering_with_a_private_address_is_refused() {
+    let fake = FakeMastodon::start().await;
+    let server = Server::start_with(&[TOKEN], false).await;
+    let port = fake.origin.rsplit(':').next().unwrap();
+    // `localhost` resolves to loopback and is refused when it is resolved; IP literals are
+    // refused before anything is sent. Either way the error names the host.
+    for (server_url, host) in [
+        (format!("http://localhost:{port}"), "`localhost`"),
+        (fake.origin.clone(), "`127.0.0.1`"),
+        ("http://[::1]:8443".to_owned(), "`[::1]`"),
+        ("http://169.254.169.254".to_owned(), "`169.254.169.254`"),
+    ] {
+        let (status, body) = server
+            .call(
+                "POST",
+                REGISTRATIONS,
+                Some(TOKEN),
+                Some(&json!({"server_url": server_url})),
+            )
+            .await;
+        assert_eq!(status, 400, "{server_url}: {body}");
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains(host), "{error}");
+        assert!(error.contains("public address"), "{error}");
+    }
+    assert!(!fake.was_registered());
+    assert_eq!(fake.fasp_call_count(), 0);
+    let (_, list) = server.call("GET", REGISTRATIONS, Some(TOKEN), None).await;
+    assert_eq!(list.as_array().map(Vec::len), Some(0), "{list}");
     server.stop().await;
 }

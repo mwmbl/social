@@ -6,6 +6,8 @@
 //! it is deliberately cautious:
 //!
 //! - Only `https://` (and `http://` when [`FetcherConfig::allow_http`] is set, for tests).
+//! - Only public addresses: see [`crate::net`] (off with
+//!   [`FetcherConfig::allow_private_addresses`], for tests).
 //! - At most [`MAX_REDIRECTS`] redirects, and only to the same host.
 //! - A found object's `id` must be on the host that served it (no spoofed objects).
 //! - Per-host concurrency and a minimum interval between requests, and exponential backoff after
@@ -136,6 +138,9 @@ pub struct FetcherConfig {
     pub default_backoff: Duration,
     /// Allow `http://` URIs. For tests only.
     pub allow_http: bool,
+    /// Allow hosts on loopback and private networks (see [`crate::net`]). For tests and dev
+    /// setups only.
+    pub allow_private_addresses: bool,
 }
 
 impl FetcherConfig {
@@ -152,6 +157,7 @@ impl FetcherConfig {
             min_interval_per_host: Duration::from_millis(250),
             default_backoff: Duration::from_secs(60),
             allow_http: false,
+            allow_private_addresses: false,
         }
     }
 }
@@ -175,6 +181,8 @@ pub enum FetchError {
     BadUri { uri: String, reason: String },
     #[error("refusing to fetch `{uri}`: only https is allowed")]
     BadScheme { uri: String },
+    #[error("refusing to fetch `{uri}`: {reason}")]
+    NotPublic { uri: String, reason: String },
     #[error("request to `{uri}` failed: {reason}")]
     Network { uri: String, reason: String },
     #[error("request to `{uri}` timed out")]
@@ -365,6 +373,7 @@ pub struct Fetcher {
     min_interval: Duration,
     default_backoff: Duration,
     allow_http: bool,
+    allow_private_addresses: bool,
     hosts: Mutex<HashMap<String, Arc<HostEntry>>>,
 }
 
@@ -433,7 +442,7 @@ fn is_tombstone(json: &Value) -> bool {
 
 impl Fetcher {
     pub fn new(config: FetcherConfig) -> Result<Self, FetchError> {
-        let client = reqwest::Client::builder()
+        let client = crate::net::client_builder(config.allow_private_addresses)
             .user_agent(config.user_agent.clone())
             .timeout(config.timeout)
             // Redirects are followed by hand, same host only.
@@ -452,6 +461,7 @@ impl Fetcher {
             min_interval: config.min_interval_per_host,
             default_backoff: config.default_backoff,
             allow_http: config.allow_http,
+            allow_private_addresses: config.allow_private_addresses,
             hosts: Mutex::new(HashMap::new()),
         })
     }
@@ -526,6 +536,12 @@ impl Fetcher {
                 reason: "no host".to_owned(),
             });
         }
+        crate::net::check_url(&url, self.allow_private_addresses).map_err(|e| {
+            FetchError::NotPublic {
+                uri: uri.to_owned(),
+                reason: e.to_string(),
+            }
+        })?;
         url.set_fragment(None);
         Ok(url)
     }
@@ -886,19 +902,39 @@ impl Fetcher {
                 );
                 Ok(response)
             }
-            Err(e) => {
-                let secs = entry.failed(now_secs(), None, self.default_backoff);
-                tracing::debug!(host, uri, scheme = scheme.name(), secs, "request failed");
-                Err(FetchOutcome::Error(if e.is_timeout() {
-                    FetchError::Timeout {
-                        uri: uri.to_owned(),
-                    }
-                } else {
-                    FetchError::Network {
-                        uri: uri.to_owned(),
-                        reason: e.without_url().to_string(),
-                    }
-                }))
+            Err(e) => Err(FetchOutcome::Error(
+                self.request_failed(e, uri, host, entry, scheme),
+            )),
+        }
+    }
+
+    /// The error for a request that got no response, starting a backoff unless the address was
+    /// refused (not the host's fault, and nothing was sent).
+    fn request_failed(
+        &self,
+        e: reqwest::Error,
+        uri: &str,
+        host: &str,
+        entry: &HostEntry,
+        scheme: SignatureScheme,
+    ) -> FetchError {
+        if let Some(refused) = crate::net::address_error(&e) {
+            tracing::debug!(host, uri, "refusing a non-public address");
+            return FetchError::NotPublic {
+                uri: uri.to_owned(),
+                reason: refused.to_string(),
+            };
+        }
+        let secs = entry.failed(now_secs(), None, self.default_backoff);
+        tracing::debug!(host, uri, scheme = scheme.name(), secs, "request failed");
+        if e.is_timeout() {
+            FetchError::Timeout {
+                uri: uri.to_owned(),
+            }
+        } else {
+            FetchError::Network {
+                uri: uri.to_owned(),
+                reason: e.without_url().to_string(),
             }
         }
     }

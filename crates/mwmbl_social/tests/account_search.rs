@@ -52,6 +52,7 @@ async fn mastodon_searches_accounts_over_signed_fasp() {
         posts_pages: 64,
         accounts_pages: 64,
         allow_http: true,
+        allow_private_addresses: true,
         ..Config::default()
     };
     let store = || Store::open(&config.store_path()).unwrap();

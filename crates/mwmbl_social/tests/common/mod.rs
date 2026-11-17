@@ -229,6 +229,7 @@ pub fn test_config(dir: &TempDir) -> Config {
         accounts_pages: 64,
         page_size: 4096,
         allow_http: true,
+        allow_private_addresses: true,
         base_url: Some("http://127.0.0.1:1".to_string()),
         ..Config::default()
     }
@@ -270,6 +271,7 @@ impl TestEnv {
             "mwmbl-social-test".to_string(),
         );
         fetcher.allow_http = true;
+        fetcher.allow_private_addresses = true;
         fetcher.min_interval_per_host = Duration::ZERO;
         let worker = Arc::new(Worker::new(
             Arc::new(Fetcher::new(fetcher).unwrap()),

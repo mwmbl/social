@@ -102,6 +102,7 @@ async fn trending_announcements_feed_trends_and_follow_recommendations() {
         posts_pages: 64,
         accounts_pages: 64,
         allow_http: true,
+        allow_private_addresses: true,
         ..Config::default()
     };
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

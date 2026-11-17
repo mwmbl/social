@@ -7,7 +7,7 @@
 
 use apub::signatures::keys::Ed25519SigningKey;
 use fasp::StoreAccess;
-use fasp::registration::{RegistrationOutcome, register};
+use fasp::registration::{RegistrationOutcome, discover_fasp_base_url, register};
 use serde_json::{Value, json};
 use store::{Registration, RegistrationStatus, Store, StoreError};
 use url::Url;
@@ -26,8 +26,9 @@ pub enum RegisterError {
     Registration(#[from] fasp::RegistrationError),
 }
 
-/// `text` as an `https` URL with a host (`http` too with `allow_http`) and no user info.
-fn server_url(text: &str, allow_http: bool) -> Result<Url, RegisterError> {
+/// `text` as an `https` URL with a host (`http` too with `allow_http`) and no user info, whose
+/// host is not a non-public IP literal (unless `allow_private`; see `apub::net`).
+fn server_url(text: &str, allow_http: bool, allow_private: bool) -> Result<Url, RegisterError> {
     let bad = |reason: &str| RegisterError::BadUrl {
         url: text.to_owned(),
         reason: reason.to_owned(),
@@ -47,7 +48,22 @@ fn server_url(text: &str, allow_http: bool) -> Result<Url, RegisterError> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(bad("must not carry user info"));
     }
+    apub::net::check_url(&url, allow_private).map_err(|e| bad(&e.to_string()))?;
     Ok(url)
+}
+
+/// A request refused because its host is not public is a bad URL, not a failure of the
+/// server's, and says which host.
+fn refused(error: fasp::RegistrationError) -> RegisterError {
+    if let fasp::RegistrationError::Http { url, source } = &error
+        && let Some(refused) = apub::net::address_error(source)
+    {
+        return RegisterError::BadUrl {
+            url: url.clone(),
+            reason: refused.to_string(),
+        };
+    }
+    RegisterError::Registration(error)
 }
 
 /// Registers with the server at `server_url` (its FASP base URL found through nodeinfo, unless
@@ -65,20 +81,31 @@ pub async fn register_server<S: StoreAccess>(
         field: "base_url",
         reason: format!("{our_base_url:?} is not a URL: {e}"),
     })?;
-    let server = server_url(server, config.allow_http)?;
+    let allow_private = config.allow_private_addresses;
+    let server = server_url(server, config.allow_http, allow_private)?;
     let fasp_base = fasp_base_url
-        .map(|url| server_url(url, config.allow_http))
+        .map(|url| server_url(url, config.allow_http, allow_private))
         .transpose()?;
+    // Discovery can name any URL as the FASP base URL, so it is found here and checked before
+    // `register` sends anything there. Names are checked when they are resolved.
+    let fasp_base = discover_fasp_base_url(http, &server, fasp_base.as_ref())
+        .await
+        .map_err(refused)?;
+    apub::net::check_url(&fasp_base, allow_private).map_err(|e| RegisterError::BadUrl {
+        url: fasp_base.to_string(),
+        reason: e.to_string(),
+    })?;
     let outcome = register(
         http,
         store,
         &config.name,
         &our_base,
         &server,
-        fasp_base.as_ref(),
+        Some(&fasp_base),
         now,
     )
-    .await?;
+    .await
+    .map_err(refused)?;
     tracing::info!(
         registration = outcome.registration_id,
         host = server.host_str().unwrap_or_default(),
@@ -200,10 +227,30 @@ mod tests {
             ("", false, false),
         ];
         for (url, allow_http, ok) in cases {
-            let result = server_url(url, allow_http);
+            let result = server_url(url, allow_http, false);
             assert_eq!(result.is_ok(), ok, "{url:?}");
             if let Err(e) = result {
                 assert!(e.to_string().contains(url), "{e} should name {url:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn non_public_ip_literals_are_refused_unless_allowed() {
+        let cases = [
+            ("https://127.0.0.1", false, false),
+            ("https://127.0.0.1", true, true),
+            ("https://169.254.169.254/latest", false, false),
+            ("https://[::1]:8443", false, false),
+            ("https://10.0.0.7", false, false),
+            ("https://8.8.8.8", false, true),
+            ("https://localhost", false, true), // a name: refused when it is resolved
+        ];
+        for (url, allow_private, ok) in cases {
+            let result = server_url(url, false, allow_private);
+            assert_eq!(result.is_ok(), ok, "{url:?}");
+            if let Err(e) = result {
+                assert!(e.to_string().contains("not a public address"), "{e}");
             }
         }
     }

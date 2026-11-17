@@ -64,6 +64,8 @@ services:
       MWMBL_SOCIAL_DATA_DIR: /data
       MWMBL_SOCIAL_POSTS_PAGES: "4096"
       MWMBL_SOCIAL_ACCOUNTS_PAGES: "1024"
+      # The dev servers are on a private Docker network.
+      MWMBL_SOCIAL_ALLOW_PRIVATE_ADDRESSES: "true"
       MWMBL_SOCIAL_CRAWL_TOKENS: dev-crawl-token-0123456789
       SSL_CERT_FILE: /ca/bundle.pem
       RUST_LOG: info,mwmbl_social=debug,apub=debug
