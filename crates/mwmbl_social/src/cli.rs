@@ -411,6 +411,7 @@ async fn serve_with_lock(
         posts: posts.clone(),
         accounts: accounts.clone(),
         tombstones: handle.tombstones(),
+        root_redirect: config.root_redirect.clone(),
     })
     .merge(fasp.routes())
     .merge(inbox.routes())

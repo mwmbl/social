@@ -9,6 +9,10 @@ use serde_json::Value;
 use social_index::{SocialAccount, SocialPost};
 
 async fn start(env: &TestEnv) -> String {
+    start_with(env, None).await
+}
+
+async fn start_with(env: &TestEnv, root_redirect: Option<&str>) -> String {
     let (posts, accounts) = env.handle.readers();
     let app = router(AppState {
         base_url: "https://social.example".into(),
@@ -18,6 +22,7 @@ async fn start(env: &TestEnv) -> String {
         posts,
         accounts,
         tombstones: env.handle.tombstones(),
+        root_redirect: root_redirect.map(str::to_owned),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -181,4 +186,40 @@ async fn search_posts_and_accounts() {
         .unwrap();
     let (_, _, body) = get(&format!("{base}/api/v1/search/posts?q=garlic")).await;
     assert_eq!(body, Value::Array(vec![]));
+}
+
+#[tokio::test]
+async fn the_root_redirects_only_when_configured() {
+    let env = TestEnv::new().await;
+    let no_follow = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let status = async |url: String| no_follow.get(url).send().await.unwrap();
+
+    let base = start(&env).await;
+    assert_eq!(status(format!("{base}/")).await.status().as_u16(), 404);
+
+    let base = start_with(&env, Some("https://mwmbl.example/social")).await;
+    let response = status(format!("{base}/")).await;
+    assert_eq!(response.status().as_u16(), 302);
+    assert_eq!(
+        response.headers()["location"].to_str().unwrap(),
+        "https://mwmbl.example/social"
+    );
+    // The query string is not carried over, and other routes are untouched.
+    let response = status(format!("{base}/?q=x")).await;
+    assert_eq!(
+        response.headers()["location"].to_str().unwrap(),
+        "https://mwmbl.example/social"
+    );
+    assert_eq!(status(format!("{base}/actor")).await.status().as_u16(), 200);
+    assert_eq!(status(format!("{base}/nope")).await.status().as_u16(), 404);
+    assert_eq!(
+        status(format!("{base}/api/v1/search/posts"))
+            .await
+            .status()
+            .as_u16(),
+        422
+    );
 }

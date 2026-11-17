@@ -104,12 +104,17 @@ async fn registers_activates_ingests_deletes_and_stops() {
         backfill_max_count: 5,
         privacy_policy_url: Some("https://social.example/privacy".to_string()),
         contact_email: Some("admin@social.example".to_string()),
+        root_redirect: Some("https://mwmbl.example/social".to_string()),
         ..Config::default()
     };
     let ours = Ours {
         base: format!("http://{addr}"),
         config: config.clone(),
-        http: reqwest::Client::new(),
+        // Never follow the root redirect off 127.0.0.1.
+        http: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap(),
     };
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let server = tokio::spawn(serve_on(config.clone(), listener, shutdown_rx));
@@ -120,6 +125,7 @@ async fn registers_activates_ingests_deletes_and_stops() {
     })
     .await;
     assert_eq!(ours.get("/nonexistent").await.0, 404);
+    assert_eq!(ours.get("/").await.0, 302);
     assert_eq!(ours.get("/api/v1/search/posts").await.0, 422);
     // The FASP paths require a signature: unsigned means 401, never a leak or a 404.
     for path in ["/provider_info", "/capabilities/data_sharing/0/activation"] {

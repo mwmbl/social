@@ -1,5 +1,5 @@
 //! The HTTP server: our actor, `WebFinger` and `NodeInfo` (so other servers can verify our
-//! signed fetches), and the search API.
+//! signed fetches), the search API, and `/` when `root_redirect` is set.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -32,10 +32,25 @@ pub struct AppState {
     pub posts: SocialReader<SocialPost>,
     pub accounts: SocialReader<SocialAccount>,
     pub tombstones: Arc<RwLock<Tombstones>>,
+    /// Where `GET /` redirects. `None`: `/` is a 404 like any other unknown path.
+    pub root_redirect: Option<String>,
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let root = state.root_redirect.as_deref().and_then(|target| {
+        HeaderValue::from_str(target)
+            .inspect_err(|_| tracing::warn!(target, "root_redirect is not a valid header value"))
+            .ok()
+    });
+    let routes = Router::new();
+    let routes = match root {
+        Some(location) => routes.route(
+            "/",
+            get(move || std::future::ready(redirect(location.clone()))),
+        ),
+        None => routes,
+    };
+    routes
         .route("/actor", get(actor))
         .route("/.well-known/webfinger", get(webfinger_route))
         .route("/.well-known/nodeinfo", get(nodeinfo_index))
@@ -62,6 +77,17 @@ fn json_ok<T: Serialize>(value: &T) -> Response {
 
 fn error(status: StatusCode, message: &str) -> Response {
     respond(status, "application/json", &json!({ "error": message }))
+}
+
+/// `GET /`. 302, not 301 or 308: a permanent redirect is cached by browsers indefinitely, and
+/// the operator may change `root_redirect` (where their site lives is their choice, and ours
+/// is only an API). 302 rather than 303 because `/` is never a POST target, so the two mean
+/// the same here and 302 is the conventional "go there instead, for now".
+fn redirect(location: HeaderValue) -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::FOUND;
+    response.headers_mut().insert(header::LOCATION, location);
+    response
 }
 
 async fn actor(State(state): State<Arc<AppState>>) -> Response {

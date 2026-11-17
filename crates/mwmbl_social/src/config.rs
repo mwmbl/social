@@ -55,6 +55,9 @@ pub struct Config {
     /// Where a server admin signs in to manage their account with us, advertised as
     /// `signInUrl` in `provider_info`.
     pub sign_in_url: Option<String>,
+    /// Where `GET /` redirects, e.g. the operator's own page about this instance. Unset: `/` is
+    /// a 404.
+    pub root_redirect: Option<String>,
     pub posts_pages: usize,
     pub accounts_pages: usize,
     pub page_size: usize,
@@ -127,6 +130,7 @@ impl Default for Config {
             privacy_policy_language: "en".to_string(),
             fediverse_account: None,
             sign_in_url: None,
+            root_redirect: None,
             posts_pages: 65_536,
             accounts_pages: 16_384,
             page_size: 4096,
@@ -254,6 +258,7 @@ impl Config {
             privacy_policy_url,
             fediverse_account,
             sign_in_url,
+            root_redirect,
         );
         set!(
             listen,
@@ -369,6 +374,7 @@ impl Config {
         for (field, value) in [
             ("base_url", &self.base_url),
             ("sign_in_url", &self.sign_in_url),
+            ("root_redirect", &self.root_redirect),
         ] {
             if let Some(value) = value {
                 check_http_url(field, value)?;
@@ -467,6 +473,7 @@ mod tests {
         assert_eq!(config.privacy_policy_language, "en");
         assert_eq!(config.fediverse_account, None);
         assert_eq!(config.sign_in_url, None);
+        assert_eq!(config.root_redirect, None);
         assert_eq!(config.backfill_max_count, 100);
         assert_eq!(
             config.trends_threshold(),
@@ -498,6 +505,7 @@ mod tests {
             privacy_policy_language = "de"
             fediverse_account = "@admin@social.example"
             sign_in_url = "https://social.example/sign-in"
+            root_redirect = "https://mwmbl.example/social"
             backfill_max_count = 25
             trends_timeframe_minutes = 60
             trends_shares = 5
@@ -527,6 +535,10 @@ mod tests {
         assert_eq!(
             config.sign_in_url.as_deref(),
             Some("https://social.example/sign-in")
+        );
+        assert_eq!(
+            config.root_redirect.as_deref(),
+            Some("https://mwmbl.example/social")
         );
         assert_eq!(config.backfill_max_count, 25);
         assert_eq!(config.trends_threshold().timeframe_minutes, 60);
@@ -575,6 +587,7 @@ mod tests {
                 ("MWMBL_SOCIAL_PRIVACY_POLICY_LANGUAGE", "fr"),
                 ("MWMBL_SOCIAL_FEDIVERSE_ACCOUNT", "@me@x.example"),
                 ("MWMBL_SOCIAL_SIGN_IN_URL", "https://x.example/in"),
+                ("MWMBL_SOCIAL_ROOT_REDIRECT", "https://x.example/about"),
                 ("MWMBL_SOCIAL_BACKFILL_MAX_COUNT", "7"),
                 ("MWMBL_SOCIAL_METRICS", "true"),
                 ("MWMBL_SOCIAL_REVALIDATE_INTERVAL_PER_HOST_MS", "250"),
@@ -599,6 +612,10 @@ mod tests {
         assert_eq!(config.privacy_policy_language, "fr");
         assert_eq!(config.fediverse_account.as_deref(), Some("@me@x.example"));
         assert_eq!(config.sign_in_url.as_deref(), Some("https://x.example/in"));
+        assert_eq!(
+            config.root_redirect.as_deref(),
+            Some("https://x.example/about")
+        );
         assert_eq!(config.backfill_max_count, 7);
         assert!(config.metrics);
         assert_eq!(config.posts_pages, 256);
@@ -669,6 +686,11 @@ mod tests {
                 .is_some_and(|e| e.contains("sign_in_url"))
         );
         assert!(bad(&|c| c.sign_in_url = Some("https://mwmbl.example/in".into())).is_none());
+        assert!(
+            bad(&|c| c.root_redirect = Some("/relative".into()))
+                .is_some_and(|e| e.contains("root_redirect"))
+        );
+        assert!(bad(&|c| c.root_redirect = Some("https://mwmbl.example/".into())).is_none());
     }
 
     #[test]
