@@ -34,7 +34,8 @@ pub struct Inner {
     /// Every request to the signed FASP API after registration: (method, path).
     pub fasp_calls: Mutex<Vec<(String, String)>>,
     /// `(id, category)` of each subscription created.
-    pub subscriptions: Mutex<Vec<(i64, String)>>,
+    /// (id, category, subscription type).
+    pub subscriptions: Mutex<Vec<(i64, String, String)>>,
     pub subscription_bodies: Mutex<Vec<Value>>,
     /// `(id, category)` of each backfill request created.
     pub backfills: Mutex<Vec<(i64, String)>>,
@@ -167,14 +168,24 @@ impl FakeMastodon {
         self.inner.registered.lock().unwrap().clone().unwrap()
     }
 
+    /// The id of our `lifecycle` subscription for `category`.
     pub fn subscription_id(&self, category: &str) -> String {
+        self.subscription_of(category, "lifecycle")
+    }
+
+    /// The id of our `trends` subscription (content).
+    pub fn trends_subscription_id(&self) -> String {
+        self.subscription_of("content", "trends")
+    }
+
+    fn subscription_of(&self, category: &str, kind: &str) -> String {
         self.inner
             .subscriptions
             .lock()
             .unwrap()
             .iter()
-            .find(|(_, c)| c == category)
-            .map(|(id, _)| id.to_string())
+            .find(|(_, c, t)| c == category && t == kind)
+            .map(|(id, _, _)| id.to_string())
             .unwrap()
     }
 
@@ -440,9 +451,17 @@ fn fasp_api(
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
+            let kind = json_body["subscriptionType"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             inner.subscription_bodies.lock().unwrap().push(json_body);
             let id = id();
-            inner.subscriptions.lock().unwrap().push((id, category));
+            inner
+                .subscriptions
+                .lock()
+                .unwrap()
+                .push((id, category, kind));
             // Mastodon returns the id as a JSON number.
             signed(
                 inner,

@@ -85,7 +85,7 @@ async fn mastodon_searches_accounts_over_signed_fasp() {
         fake.verify(&reply);
     }
     wait_until("the account subscription", async || {
-        fake.inner.subscriptions.lock().unwrap().len() == 2
+        fake.inner.subscriptions.lock().unwrap().len() == 3
     })
     .await;
     let account_sub = fake.subscription_id("account");
@@ -211,13 +211,12 @@ async fn blocked_and_forgotten_accounts_are_not_returned_and_pages_are_consisten
             .await;
     }
 
-    let (_, accounts) = env.handle.readers();
     let app = FaspApp::new(
         Store::open(&env.config.store_path()).unwrap(),
         reqwest::Client::new(),
         &env.config,
         "http://127.0.0.1:1",
-        accounts,
+        env.handle.readers(),
         env.handle.tombstones(),
     );
     let alice = env.fake.url("/users/alice");

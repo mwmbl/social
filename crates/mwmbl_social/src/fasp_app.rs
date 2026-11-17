@@ -16,13 +16,18 @@ use axum::Router;
 use axum::routing::any_service;
 use fasp::announcement::{Announcement, AnnouncementSource, EventType};
 use fasp::client::FaspClient;
+use fasp::data_sharing::TrendsThreshold;
 use fasp::data_sharing::{on_backfill_announcement, on_disable, on_enable, resume_backfills};
-use fasp::http::{AccountSearchPage, FaspState, router};
+use fasp::http::{AccountSearchPage, FaspState, TrendingContent, TrendingTag, TrendsQuery, router};
 use fasp::{
     ACCOUNT_SEARCH_ID, ACCOUNT_SEARCH_VERSION, Capability, ClientError, DATA_SHARING_ID,
-    DATA_SHARING_VERSION, PrivacyPolicy, ProviderInfoConfig, StoreAccess,
+    DATA_SHARING_VERSION, FOLLOW_RECOMMENDATION_ID, FOLLOW_RECOMMENDATION_VERSION, PrivacyPolicy,
+    ProviderInfoConfig, StoreAccess, TRENDS_ID, TRENDS_VERSION,
 };
-use social_index::{SocialAccount, SocialReader, Tombstones, search_accounts};
+use social_index::{
+    SocialAccount, SocialPost, SocialReader, Tombstones, language_matches, related_accounts,
+    search_accounts,
+};
 use store::{
     BackfillState, Category, FetchKind, FetchReason, NewFetch, Registration, RegistrationStatus,
     Store, SubscriptionType,
@@ -31,6 +36,7 @@ use tokio::sync::watch;
 
 use crate::config::Config;
 use crate::now_secs;
+use crate::trends::{MAX_WINDOW_HOURS, TrendState, rank};
 
 /// How often the background task looks for backfills to resume and enables to retry.
 pub const MAINTAIN_EVERY: Duration = Duration::from_secs(60);
@@ -42,12 +48,23 @@ const RESUME_BELOW_PERCENT: usize = 50;
 
 /// The paths our FASP router serves, as route patterns at the root of our base URL. Only these
 /// reach it: the FASP router authenticates every request it gets, so it must not see the rest.
-pub const FASP_ROUTES: [&str; 4] = [
+pub const FASP_ROUTES: [&str; 6] = [
     "/provider_info",
     "/capabilities/{*rest}",
     "/data_sharing/{*rest}",
     "/account_search/{*rest}",
+    "/trends/{*rest}",
+    "/follow_recommendation/{*rest}",
 ];
+
+/// The most trend-state URIs looked up in the posts index for one request. Each lookup is a
+/// page read, so this bounds a request's cost whatever the trend state holds.
+const MAX_TREND_LOOKUPS: usize = 500;
+/// Example post URIs given with each trending hashtag.
+const HASHTAG_EXAMPLES: usize = 3;
+/// The most accounts one follow recommendation returns. Mastodon fetches each one it does not
+/// know, so this is kept small.
+pub const MAX_RECOMMENDATIONS: usize = 20;
 
 struct Inner {
     store: Arc<Mutex<Store>>,
@@ -61,8 +78,13 @@ struct Inner {
     /// The accounts index, read-only, for `account_search`. Results are pooled across every
     /// registration (PLAN.md, Multi-tenancy).
     accounts: SocialReader<SocialAccount>,
+    /// The posts index, read-only, so trends only return posts we have indexed.
+    posts: SocialReader<SocialPost>,
     /// The writer's tombstones: blocked hosts and forgotten accounts never appear.
     tombstones: Arc<RwLock<Tombstones>>,
+    /// `trending` announcements, pooled across registrations (bounded; see `crate::trends`).
+    trends: Mutex<TrendState>,
+    trends_threshold: TrendsThreshold,
 }
 
 /// How long to wait before fetching an object an `update` announcement names. Mastodon 4.7.5
@@ -127,17 +149,19 @@ fn below_percent(len: usize, cap: usize, percent: usize) -> bool {
 
 impl FaspApp {
     /// `store` is this component's own connection. `base_url` is our public base URL.
-    /// `accounts` and `tombstones` are the writer's (see `WriterHandle::readers` and
-    /// `WriterHandle::tombstones`), which `account_search` reads.
+    /// `readers` and `tombstones` are the writer's (see `WriterHandle::readers` and
+    /// `WriterHandle::tombstones`), which `account_search`, `trends` and
+    /// `follow_recommendation` read.
     #[must_use]
     pub fn new(
         store: Store,
         http: reqwest::Client,
         config: &Config,
         base_url: &str,
-        accounts: SocialReader<SocialAccount>,
+        readers: (SocialReader<SocialPost>, SocialReader<SocialAccount>),
         tombstones: Arc<RwLock<Tombstones>>,
     ) -> Self {
+        let (posts, accounts) = readers;
         Self {
             inner: Arc::new(Inner {
                 store: Arc::new(Mutex::new(store)),
@@ -148,7 +172,10 @@ impl FaspApp {
                 backfill_max_count: config.backfill_max_count,
                 busy: Mutex::new(HashSet::new()),
                 accounts,
+                posts,
                 tombstones,
+                trends: Mutex::new(TrendState::new(config.trends_max_uris)),
+                trends_threshold: config.trends_threshold(),
             }),
         }
     }
@@ -256,7 +283,7 @@ impl FaspApp {
             &*self.inner.store,
             now_secs(),
             self.inner.backfill_max_count,
-            None,
+            Some(self.inner.trends_threshold),
         )
         .await;
         if let Err(e) = result {
@@ -275,21 +302,29 @@ impl FaspApp {
     }
 
     /// Whether an enabled `data_sharing` registration lacks a subscription or a backfill
-    /// request for either category (an earlier set-up failed part-way).
+    /// request for either category, or the content `trends` subscription (an earlier set-up
+    /// failed part-way, or it predates trends).
     fn needs_enable(&self, registration_id: i64) -> bool {
         self.with_store(|s| {
             let subscriptions = s.list_subscriptions(registration_id)?;
             let backfills = s.list_backfills(registration_id)?;
-            Ok::<_, store::StoreError>([Category::Content, Category::Account].iter().any(
-                |&category| {
-                    !subscriptions.iter().any(|sub| {
-                        sub.category == category
-                            && sub.subscription_type == SubscriptionType::Lifecycle
-                    }) || !backfills
+            let no_trends = !subscriptions.iter().any(|sub| {
+                sub.category == Category::Content
+                    && sub.subscription_type == SubscriptionType::Trends
+            });
+            Ok::<_, store::StoreError>(
+                no_trends
+                    || [Category::Content, Category::Account]
                         .iter()
-                        .any(|b| b.category == category && b.state != BackfillState::Failed)
-                },
-            ))
+                        .any(|&category| {
+                            !subscriptions.iter().any(|sub| {
+                                sub.category == category
+                                    && sub.subscription_type == SubscriptionType::Lifecycle
+                            }) || !backfills
+                                .iter()
+                                .any(|b| b.category == category && b.state != BackfillState::Failed)
+                        }),
+            )
         })
         .unwrap_or(false)
     }
@@ -399,6 +434,167 @@ impl FaspApp {
     }
 }
 
+impl FaspApp {
+    /// Records `trending` announcements and queues the URIs we have not indexed, so a post
+    /// that trends before we have seen it can be fetched (from its origin, and judged for
+    /// consent like any announced object) and then served. They are queued as backfill, so a
+    /// full queue defers them rather than displacing lifecycle announcements.
+    fn record_trending(&self, uris: &[String]) -> usize {
+        let now = now_secs();
+        {
+            let mut trends = self
+                .inner
+                .trends
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for uri in uris {
+                trends.record(uri, now);
+            }
+        }
+        let missing: Vec<String> = uris
+            .iter()
+            .filter(|uri| matches!(self.inner.posts.find(uri), Ok(None)))
+            .cloned()
+            .collect();
+        self.enqueue_all(&missing, FetchKind::Object, FetchReason::Backfill, 0)
+    }
+
+    /// Trending posts in the last `hours` hours that we have indexed and may show, with their
+    /// event counts, best first, at most `want`. A URI missing from the posts index (not yet
+    /// fetched, refused for consent, or fallen off its page) or tombstoned is skipped, so
+    /// trends never surface anything we could not index. With a `language`, a post must
+    /// carry a matching one.
+    fn trending_posts(
+        &self,
+        now: i64,
+        hours: i64,
+        language: Option<&str>,
+        want: usize,
+    ) -> Result<Vec<(SocialPost, u64)>, String> {
+        let ranked = self
+            .inner
+            .trends
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .ranked(now, hours);
+        let tombstones = self
+            .inner
+            .tombstones
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut found = Vec::new();
+        for trending in ranked.into_iter().take(MAX_TREND_LOOKUPS) {
+            if found.len() >= want {
+                break;
+            }
+            let post = self
+                .inner
+                .posts
+                .find(&trending.uri)
+                .map_err(|e| format!("looking up {} failed: {e}", trending.uri))?;
+            let Some(post) = post else { continue };
+            if tombstones.blocks(&post) {
+                continue;
+            }
+            if let Some(range) = language
+                && !post
+                    .language
+                    .as_ref()
+                    .is_some_and(|l| language_matches(Some(std::slice::from_ref(l)), range))
+            {
+                continue;
+            }
+            found.push((post, trending.count));
+        }
+        Ok(found)
+    }
+
+    /// Hashtags of the trending posts, each scored by the sum of its posts' event counts, with
+    /// the best of those posts as examples.
+    fn trending_tags(posts: &[(SocialPost, u64)]) -> Vec<TrendingTag> {
+        let mut tags: Vec<(String, u64, Vec<String>)> = Vec::new();
+        for (post, count) in posts {
+            let text = match &post.title {
+                Some(title) => format!("{title} {}", post.extract),
+                None => post.extract.clone(),
+            };
+            for tag in tokenize::special_keys(&text)
+                .into_iter()
+                .filter(|k| k.starts_with('#') && k.len() > 1)
+            {
+                match tags.iter_mut().find(|(name, _, _)| *name == tag) {
+                    Some((_, score, examples)) => {
+                        *score = score.saturating_add(*count);
+                        if examples.len() < HASHTAG_EXAMPLES {
+                            examples.push(post.uri.clone());
+                        }
+                    }
+                    None => tags.push((tag, *count, vec![post.uri.clone()])),
+                }
+            }
+        }
+        tags.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        tags.into_iter()
+            .map(|(name, score, examples)| TrendingTag {
+                name,
+                rank: rank(score),
+                examples,
+            })
+            .collect()
+    }
+
+    /// Follow recommendations for `account_uri`: accounts related by the words of its own
+    /// indexed name and bio (only if we have indexed it, so only if it is discoverable), then
+    /// authors of this week's trending posts. Every result is an indexed (so discoverable),
+    /// non-tombstoned account other than the one asking.
+    fn recommend(&self, account_uri: &str, language: Option<&str>) -> Result<Vec<String>, String> {
+        let accounts = &self.inner.accounts;
+        let mut out: Vec<String> = Vec::new();
+        let push = |uri: &str, out: &mut Vec<String>| {
+            if uri != account_uri
+                && out.len() < MAX_RECOMMENDATIONS
+                && !out.iter().any(|u| u == uri)
+            {
+                out.push(uri.to_owned());
+            }
+        };
+        let trending =
+            self.trending_posts(now_secs(), MAX_WINDOW_HOURS, None, MAX_TREND_LOOKUPS)?;
+        let tombstones = self
+            .inner
+            .tombstones
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let lookup_failed = |e: tinyindex::IndexError| format!("account lookup failed: {e}");
+        if let Some(me) = accounts
+            .find(account_uri)
+            .map_err(lookup_failed)?
+            .filter(|a| !tombstones.blocks(a))
+        {
+            for related in
+                related_accounts(accounts, &me, &tombstones, language).map_err(lookup_failed)?
+            {
+                push(&related.uri, &mut out);
+            }
+        }
+        for (post, _) in &trending {
+            if out.len() >= MAX_RECOMMENDATIONS {
+                break;
+            }
+            let Some(author) = accounts.find(&post.author_uri).map_err(lookup_failed)? else {
+                continue;
+            };
+            if tombstones.blocks(&author)
+                || language.is_some_and(|l| !language_matches(author.languages.as_deref(), l))
+            {
+                continue;
+            }
+            push(&author.uri, &mut out);
+        }
+        Ok(out)
+    }
+}
+
 fn log_client_error(client: &FaspClient<Mutex<Store>>, what: &str, error: &ClientError) {
     match error {
         ClientError::NotEnabled(_) => tracing::info!(
@@ -431,7 +627,76 @@ impl FaspState for FaspApp {
     }
 
     fn extra_capabilities(&self) -> Vec<Capability> {
-        vec![Capability::new(ACCOUNT_SEARCH_ID, ACCOUNT_SEARCH_VERSION)]
+        vec![
+            Capability::new(ACCOUNT_SEARCH_ID, ACCOUNT_SEARCH_VERSION),
+            Capability::new(TRENDS_ID, TRENDS_VERSION),
+            Capability::new(FOLLOW_RECOMMENDATION_ID, FOLLOW_RECOMMENDATION_VERSION),
+        ]
+    }
+
+    async fn trending_content(
+        &self,
+        _registration_id: i64,
+        query: &TrendsQuery,
+    ) -> Result<Vec<TrendingContent>, String> {
+        let app = self.clone();
+        let query = query.clone();
+        tokio::task::spawn_blocking(move || {
+            let posts = app.trending_posts(
+                now_secs(),
+                i64::from(query.within_last_hours),
+                query.language.as_deref(),
+                query.max_count,
+            )?;
+            Ok(posts
+                .into_iter()
+                .map(|(post, count)| TrendingContent {
+                    uri: post.uri,
+                    rank: rank(count),
+                })
+                .collect())
+        })
+        .await
+        .map_err(|e| format!("the trends task failed: {e}"))?
+    }
+
+    async fn trending_hashtags(
+        &self,
+        _registration_id: i64,
+        query: &TrendsQuery,
+    ) -> Result<Vec<TrendingTag>, String> {
+        let app = self.clone();
+        let query = query.clone();
+        tokio::task::spawn_blocking(move || {
+            let posts = app.trending_posts(
+                now_secs(),
+                i64::from(query.within_last_hours),
+                query.language.as_deref(),
+                MAX_TREND_LOOKUPS,
+            )?;
+            let mut tags = Self::trending_tags(&posts);
+            tags.truncate(query.max_count);
+            Ok(tags)
+        })
+        .await
+        .map_err(|e| format!("the trends task failed: {e}"))?
+    }
+
+    async fn follow_recommendations(
+        &self,
+        registration_id: i64,
+        account_uri: &str,
+        language: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let app = self.clone();
+        let account_uri = account_uri.to_owned();
+        let language = language.map(str::to_owned);
+        tokio::task::spawn_blocking(move || app.recommend(&account_uri, language.as_deref()))
+            .await
+            .map_err(|e| format!("the follow recommendation task failed: {e}"))?
+            .map_err(|e| {
+                format!("follow recommendation failed for registration {registration_id}: {e}")
+            })
     }
 
     async fn account_search(
@@ -517,6 +782,22 @@ impl FaspState for FaspApp {
             ),
         };
         let count = object_uris.len();
+        if event == Some(EventType::Trending) {
+            let app = self.clone();
+            let queued =
+                tokio::task::spawn_blocking(move || app.record_trending(&object_uris)).await;
+            match queued {
+                Ok(taken) => tracing::debug!(
+                    registration = registration_id,
+                    count,
+                    taken,
+                    "trending announcement recorded"
+                ),
+                Err(e) => tracing::error!(registration = registration_id, error = %e,
+                    "the trending recording task failed"),
+            }
+            return;
+        }
         let delay = if event == Some(EventType::Update) {
             UPDATE_FETCH_DELAY_SECS
         } else {

@@ -72,6 +72,15 @@ pub struct Config {
     pub max_transient_attempts: i64,
     /// How many objects each FASP backfill request asks a server for, per category.
     pub backfill_max_count: u32,
+    /// The threshold of the `trends` subscription made with `data_sharing`: a server announces
+    /// a post as trending once it has this many shares, likes or replies within this many
+    /// minutes. The defaults are the spec's.
+    pub trends_timeframe_minutes: u32,
+    pub trends_shares: u32,
+    pub trends_likes: u32,
+    pub trends_replies: u32,
+    /// The most post URIs the in-memory trend state holds (PLAN.md Stage 4).
+    pub trends_max_uris: usize,
     /// Serve Prometheus metrics at `/metrics` on the main listener. They are public there, so
     /// firewall the path or proxy it to an internal-only listener.
     pub metrics: bool,
@@ -127,6 +136,11 @@ impl Default for Config {
             revalidate_interval_per_host_ms: 1000,
             max_transient_attempts: 10,
             backfill_max_count: 100,
+            trends_timeframe_minutes: 15,
+            trends_shares: 3,
+            trends_likes: 3,
+            trends_replies: 3,
+            trends_max_uris: 5000,
             metrics: false,
             follow: Vec::new(),
             outbox_backfill_pages: 5,
@@ -240,6 +254,11 @@ impl Config {
             revalidate_interval_per_host_ms,
             max_transient_attempts,
             backfill_max_count,
+            trends_timeframe_minutes,
+            trends_shares,
+            trends_likes,
+            trends_replies,
+            trends_max_uris,
             outbox_backfill_pages,
             metrics,
             allow_http,
@@ -291,6 +310,19 @@ impl Config {
         }
         if self.backfill_max_count == 0 {
             return Err(invalid("backfill_max_count", "must be greater than 0"));
+        }
+        for (field, value) in [
+            ("trends_timeframe_minutes", self.trends_timeframe_minutes),
+            ("trends_shares", self.trends_shares),
+            ("trends_likes", self.trends_likes),
+            ("trends_replies", self.trends_replies),
+        ] {
+            if value == 0 {
+                return Err(invalid(field, "must be greater than 0"));
+            }
+        }
+        if self.trends_max_uris == 0 {
+            return Err(invalid("trends_max_uris", "must be greater than 0"));
         }
         for target in &self.follow {
             crate::follows::parse_follow_target(target).map_err(|e| ConfigError::Invalid {
@@ -347,6 +379,17 @@ impl Config {
                 bigrams: self.key_bigrams,
                 special: self.key_special,
             },
+        }
+    }
+
+    /// The `threshold` sent with the `trends` subscription.
+    #[must_use]
+    pub fn trends_threshold(&self) -> fasp::data_sharing::TrendsThreshold {
+        fasp::data_sharing::TrendsThreshold {
+            timeframe_minutes: self.trends_timeframe_minutes,
+            shares: self.trends_shares,
+            likes: self.trends_likes,
+            replies: self.trends_replies,
         }
     }
 
@@ -408,6 +451,11 @@ mod tests {
         assert_eq!(config.privacy_policy_language, "en");
         assert_eq!(config.fediverse_account, None);
         assert_eq!(config.backfill_max_count, 100);
+        assert_eq!(
+            config.trends_threshold(),
+            fasp::data_sharing::TrendsThreshold::default()
+        );
+        assert_eq!(config.trends_max_uris, 5000);
         assert!(!config.metrics);
         assert_eq!(config.follow, Vec::<String>::new());
         assert_eq!(config.outbox_backfill_pages, 5);
@@ -433,6 +481,9 @@ mod tests {
             privacy_policy_language = "de"
             fediverse_account = "@admin@social.example"
             backfill_max_count = 25
+            trends_timeframe_minutes = 60
+            trends_shares = 5
+            trends_max_uris = 10
             metrics = true
             follow = ["!rust@lemmy.example", "@alice@m.example"]
             outbox_backfill_pages = 2
@@ -456,6 +507,10 @@ mod tests {
             Some("@admin@social.example")
         );
         assert_eq!(config.backfill_max_count, 25);
+        assert_eq!(config.trends_threshold().timeframe_minutes, 60);
+        assert_eq!(config.trends_threshold().shares, 5);
+        assert_eq!(config.trends_threshold().likes, 3);
+        assert_eq!(config.trends_max_uris, 10);
         assert!(config.metrics);
         assert_eq!(config.follow, ["!rust@lemmy.example", "@alice@m.example"]);
         assert_eq!(config.outbox_backfill_pages, 2);

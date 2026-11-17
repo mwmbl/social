@@ -31,6 +31,6 @@ pub use index::SocialReader;
 pub use index::{DeleteOutcome, SocialIndex, SocialIndexError};
 pub use item::{SocialAccount, SocialPost};
 pub use keys::{KeyScheme, Keyed};
-pub use search::{search_accounts, search_posts};
+pub use search::{language_matches, related_accounts, search_accounts, search_posts};
 pub use sweep::{SweepOutcome, SweepSeen, sweep_page};
 pub use tombstones::Tombstones;

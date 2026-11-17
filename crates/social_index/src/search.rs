@@ -177,6 +177,36 @@ pub fn search_accounts(
     Ok(sorted(scored))
 }
 
+/// Accounts related to `account`, best first: those found under the keys of its display name
+/// and bio (never its handle, host or URI, so sharing a server is not a reason), ranked by
+/// how many of those keys they share (bigrams count double, all words double again) and then
+/// by the index-time score. `account` itself and tombstoned or blocked accounts are left out,
+/// and `language` filters as in [`search_accounts`].
+pub fn related_accounts(
+    reader: &SocialReader<SocialAccount>,
+    account: &SocialAccount,
+    tombstones: &Tombstones,
+    language: Option<&str>,
+) -> Result<Vec<SocialAccount>, IndexError> {
+    let config = tokenize::KeyConfig::default();
+    let mut keys = field_keys(&account.display_name, &config);
+    for key in field_keys(&account.summary, &config) {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    let scored = gather(reader, &keys, tombstones)?
+        .into_iter()
+        .filter(|c| c.item.uri != account.uri)
+        .filter(|c| language.is_none_or(|l| language_matches(c.item.languages.as_deref(), l)))
+        .map(|c| {
+            let rank = match_score(&keys, &c.matched) * (1.0 + 0.1 * quality(c.item.score));
+            (rank, c.item)
+        })
+        .collect();
+    Ok(sorted(scored))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +319,32 @@ mod tests {
         assert_eq!(uris(&found)[0], "https://y.example/users/q");
         let found = search_accounts(&r, "Q@Y.EXAMPLE", &Tombstones::new(), None).unwrap();
         assert_eq!(uris(&found)[0], "https://y.example/users/q");
+    }
+
+    #[test]
+    fn related_accounts_share_name_and_bio_words_not_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index: SocialIndex<SocialAccount> =
+            SocialIndex::create(&dir.path().join("a"), 256, 4096, KeyScheme::default()).unwrap();
+        let mut me = account("https://h.example/users/me", "me@h.example", "Me");
+        me.summary = "Sourdough baking and cycling".into();
+        let mut both = account("https://x.example/users/b", "b@x.example", "B");
+        both.summary = "cycling, sourdough baking".into();
+        let mut one = account("https://y.example/users/o", "o@y.example", "O");
+        one.summary = "weekend cycling".into();
+        let neighbour = account("https://h.example/users/n", "n@h.example", "N");
+        let mut gone = account("https://z.example/users/g", "g@z.example", "G");
+        gone.summary = "sourdough baking and cycling".into();
+        for a in [&me, &both, &one, &neighbour, &gone] {
+            index.add(a).unwrap();
+        }
+        let mut t = Tombstones::new();
+        t.add_object(&gone.uri);
+        let found = related_accounts(&index.reader(), &me, &t, None).unwrap();
+        assert_eq!(
+            uris(&found),
+            ["https://x.example/users/b", "https://y.example/users/o"]
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub mod records;
 pub mod robots;
 pub mod search;
 pub mod sweep;
+pub mod trends;
 pub mod worker;
 pub mod writer;
 

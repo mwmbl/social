@@ -376,7 +376,7 @@ async fn serve_with_lock(
         http_client(&base_url)?,
         &config,
         &base_url,
-        accounts.clone(),
+        (posts.clone(), accounts.clone()),
         handle.tombstones(),
     );
     tasks.spawn(

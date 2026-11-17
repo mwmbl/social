@@ -155,6 +155,8 @@ async fn registers_activates_ingests_deletes_and_stops() {
         json!([
             {"id": "data_sharing", "version": "0.1"},
             {"id": "account_search", "version": "0.1"},
+            {"id": "trends", "version": "0.1"},
+            {"id": "follow_recommendation", "version": "0.1"},
         ])
     );
     assert_eq!(
@@ -167,14 +169,15 @@ async fn registers_activates_ingests_deletes_and_stops() {
         RegistrationStatus::Active
     );
 
-    // Activation: 204, then we create a lifecycle subscription and a backfill per category.
+    // Activation: 204, then we create a lifecycle subscription and a backfill per category,
+    // and a content trends subscription with the spec's default threshold.
     let reply = fake.call_ours("POST", ACTIVATION, b"").await;
     assert_eq!(reply.status, 204);
     fake.verify(&reply);
     wait_until(
-        "two subscriptions and two backfills on the fake",
+        "three subscriptions and two backfills on the fake",
         async || {
-            fake.inner.subscriptions.lock().unwrap().len() == 2
+            fake.inner.subscriptions.lock().unwrap().len() == 3
                 && fake.inner.backfills.lock().unwrap().len() == 2
                 && ours.store().list_backfills(id).unwrap().len() == 2
         },
@@ -189,13 +192,17 @@ async fn registers_activates_ingests_deletes_and_stops() {
             "{category}: {subscription_bodies:?}"
         );
     }
+    assert!(subscription_bodies.contains(&json!({
+        "category": "content", "subscriptionType": "trends", "maxBatchSize": 20,
+        "threshold": {"timeframe": 15, "shares": 3, "likes": 3, "replies": 3}
+    })));
     let backfill_bodies = fake.inner.backfill_bodies.lock().unwrap().clone();
     assert!(
         backfill_bodies.iter().all(|b| b["maxCount"] == 5),
         "{backfill_bodies:?}"
     );
     let stored = ours.store().list_subscriptions(id).unwrap();
-    assert_eq!(stored.len(), 2);
+    assert_eq!(stored.len(), 3);
     assert!(
         stored
             .iter()
@@ -205,7 +212,7 @@ async fn registers_activates_ingests_deletes_and_stops() {
     // Activating again is idempotent: nothing more is created.
     assert_eq!(fake.call_ours("POST", ACTIVATION, b"").await.status, 204);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(fake.inner.subscriptions.lock().unwrap().len(), 2);
+    assert_eq!(fake.inner.subscriptions.lock().unwrap().len(), 3);
     assert_eq!(fake.inner.backfills.lock().unwrap().len(), 2);
 
     // A `new` lifecycle event (subscription id as a string): fetched, consented, indexed.
