@@ -5,7 +5,7 @@
 mod common;
 
 use common::{FakeHost, PUBLIC, TestEnv};
-use mwmbl_social::config::{Config, CrawlTokens};
+use mwmbl_social::config::{Config, Tokens};
 use mwmbl_social::crawl_app::CrawlApp;
 use serde_json::{Value, json};
 use store::FetchReason;
@@ -74,7 +74,7 @@ fn serve_page(host: &FakeHost, path: &str, author: &str, title: &str) {
 
 async fn start_endpoint(env: &TestEnv, tokens: &[&str]) -> String {
     let config = Config {
-        crawl_tokens: CrawlTokens(tokens.iter().map(|t| (*t).to_owned()).collect()),
+        crawl_tokens: Tokens(tokens.iter().map(|t| (*t).to_owned()).collect()),
         ..env.config.clone()
     };
     let app = CrawlApp::new(

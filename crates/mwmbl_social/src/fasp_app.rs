@@ -191,6 +191,12 @@ impl FaspApp {
         })
     }
 
+    /// The HTTP client for our calls to servers, shared with the admin API's registrations.
+    #[must_use]
+    pub fn http(&self) -> &reqwest::Client {
+        &self.inner.http
+    }
+
     fn try_claim(&self, registration_id: i64) -> Option<BusyGuard> {
         self.inner
             .busy

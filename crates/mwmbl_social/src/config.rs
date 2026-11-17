@@ -98,22 +98,44 @@ pub struct Config {
     pub outbox_backfill_pages: usize,
     /// Bearer tokens accepted by `POST /api/v1/crawl/submissions`. None: the endpoint answers
     /// 404. The environment override is a comma-separated list.
-    pub crawl_tokens: CrawlTokens,
+    pub crawl_tokens: Tokens,
+    /// Bearer tokens accepted by the admin API (`/api/v1/admin/...`), as for `crawl_tokens`.
+    /// None: the admin API answers 404.
+    pub admin_tokens: Tokens,
     /// Allow `http://` URIs. For tests only.
     pub allow_http: bool,
 }
 
-/// The shortest crawl token accepted.
-pub const MIN_CRAWL_TOKEN_LEN: usize = 16;
+/// The shortest bearer token accepted (`crawl_tokens`, `admin_tokens`).
+pub const MIN_TOKEN_LEN: usize = 16;
 
-/// Secrets: `Debug` shows how many there are, never what they are.
+/// Bearer tokens, which are secrets: `Debug` shows how many there are, never what they are.
 #[derive(Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(transparent)]
-pub struct CrawlTokens(pub Vec<String>);
+pub struct Tokens(pub Vec<String>);
 
-impl std::fmt::Debug for CrawlTokens {
+impl std::fmt::Debug for Tokens {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CrawlTokens({} redacted)", self.0.len())
+        write!(f, "Tokens({} redacted)", self.0.len())
+    }
+}
+
+impl Tokens {
+    /// Each token must be at least [`MIN_TOKEN_LEN`] characters, without whitespace.
+    fn validate(&self, field: &'static str) -> Result<(), ConfigError> {
+        if self
+            .0
+            .iter()
+            .any(|t| t.chars().count() < MIN_TOKEN_LEN || t.chars().any(char::is_whitespace))
+        {
+            return Err(ConfigError::Invalid {
+                field,
+                reason: format!(
+                    "each must be at least {MIN_TOKEN_LEN} characters, without whitespace"
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -152,7 +174,8 @@ impl Default for Config {
             metrics: false,
             follow: Vec::new(),
             outbox_backfill_pages: 5,
-            crawl_tokens: CrawlTokens::default(),
+            crawl_tokens: Tokens::default(),
+            admin_tokens: Tokens::default(),
             allow_http: false,
         }
     }
@@ -302,7 +325,10 @@ impl Config {
             self.follow = follow;
         }
         if let Some(tokens) = list("CRAWL_TOKENS") {
-            self.crawl_tokens = CrawlTokens(tokens);
+            self.crawl_tokens = Tokens(tokens);
+        }
+        if let Some(tokens) = list("ADMIN_TOKENS") {
+            self.admin_tokens = Tokens(tokens);
         }
         Ok(())
     }
@@ -355,19 +381,8 @@ impl Config {
                 reason: e.to_string(),
             })?;
         }
-        if self
-            .crawl_tokens
-            .0
-            .iter()
-            .any(|t| t.chars().count() < MIN_CRAWL_TOKEN_LEN || t.chars().any(char::is_whitespace))
-        {
-            return Err(ConfigError::Invalid {
-                field: "crawl_tokens",
-                reason: format!(
-                    "each must be at least {MIN_CRAWL_TOKEN_LEN} characters, without whitespace"
-                ),
-            });
-        }
+        self.crawl_tokens.validate("crawl_tokens")?;
+        self.admin_tokens.validate("admin_tokens")?;
         if self.privacy_policy_language.trim().is_empty() {
             return Err(invalid("privacy_policy_language", "must not be empty"));
         }
@@ -483,7 +498,8 @@ mod tests {
         assert!(!config.metrics);
         assert_eq!(config.follow, Vec::<String>::new());
         assert_eq!(config.outbox_backfill_pages, 5);
-        assert_eq!(config.crawl_tokens, CrawlTokens::default());
+        assert_eq!(config.crawl_tokens, Tokens::default());
+        assert_eq!(config.admin_tokens, Tokens::default());
         assert_eq!(config.base_url, None);
         config.validate()?;
         assert!(config.require_base_url().is_err());
@@ -514,6 +530,7 @@ mod tests {
             follow = ["!rust@lemmy.example", "@alice@m.example"]
             outbox_backfill_pages = 2
             crawl_tokens = ["0123456789abcdef"]
+            admin_tokens = ["admin-0123456789"]
         "#;
         let config = Config::from_sources(Some(("c.toml", text)), env_of(&[]))?;
         assert_eq!(config.base_url.as_deref(), Some("https://social.example"));
@@ -549,11 +566,10 @@ mod tests {
         assert_eq!(config.follow, ["!rust@lemmy.example", "@alice@m.example"]);
         assert_eq!(config.outbox_backfill_pages, 2);
         assert_eq!(config.crawl_tokens.0, ["0123456789abcdef"]);
-        assert_eq!(
-            format!("{:?}", config.crawl_tokens),
-            "CrawlTokens(1 redacted)"
-        );
+        assert_eq!(format!("{:?}", config.crawl_tokens), "Tokens(1 redacted)");
+        assert_eq!(config.admin_tokens.0, ["admin-0123456789"]);
         assert!(!format!("{config:?}").contains("0123456789abcdef"));
+        assert!(!format!("{config:?}").contains("admin-0123456789"));
         config.validate()?;
         assert_eq!(
             config.store_path(),
@@ -600,12 +616,14 @@ mod tests {
                     "MWMBL_SOCIAL_CRAWL_TOKENS",
                     "aaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbb,",
                 ),
+                ("MWMBL_SOCIAL_ADMIN_TOKENS", " cccccccccccccccc "),
             ]),
         )?;
         assert_eq!(
             config.crawl_tokens.0,
             ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"]
         );
+        assert_eq!(config.admin_tokens.0, ["cccccccccccccccc"]);
         assert_eq!(config.follow, ["!a@l.example", "https://m.example/users/b"]);
         assert_eq!(config.outbox_backfill_pages, 0);
         assert_eq!(config.revalidate_interval_per_host_ms, 250);
@@ -665,13 +683,18 @@ mod tests {
             bad(&|c| c.backfill_max_count = 0).is_some_and(|e| e.contains("backfill_max_count"))
         );
         assert!(bad(&|c| c.privacy_policy_language = " ".into()).is_some());
-        let tokens = |t: &[&str]| CrawlTokens(t.iter().map(|t| (*t).to_owned()).collect());
+        let tokens = |t: &[&str]| Tokens(t.iter().map(|t| (*t).to_owned()).collect());
         assert!(
             bad(&|c| c.crawl_tokens = tokens(&["short"]))
                 .is_some_and(|e| e.contains("crawl_tokens"))
         );
         assert!(bad(&|c| c.crawl_tokens = tokens(&["0123456789 abcdef"])).is_some());
         assert!(bad(&|c| c.crawl_tokens = tokens(&["0123456789abcdef"])).is_none());
+        assert!(
+            bad(&|c| c.admin_tokens = tokens(&["0123456789abcdef", "short"]))
+                .is_some_and(|e| e.contains("admin_tokens"))
+        );
+        assert!(bad(&|c| c.admin_tokens = tokens(&["0123456789abcdef"])).is_none());
         assert!(bad(&|c| c.follow = vec!["rust".into()]).is_some_and(|e| e.contains("follow")));
         assert!(bad(&|c| c.follow = vec!["!rust@l.example".into()]).is_none());
         assert!(

@@ -18,12 +18,11 @@ use anyhow::{Context, bail};
 use apub::actor::server_actor_key_id;
 use apub::fetch::{DeliveryOutcome, Fetcher, FetcherConfig, user_agent};
 use clap::{Parser, Subcommand, ValueEnum};
-use fasp::registration::{RegistrationOutcome, register as fasp_register};
+use fasp::registration::RegistrationOutcome;
 use serde_json::{Value, json};
 use social_index::{SocialAccount, SocialPost, SocialReader, Tombstones};
 use store::{
-    EnqueueOutcome, FetchKind, FetchReason, FollowState, Following, NewFetch, RegistrationStatus,
-    Store, TombstoneKind,
+    EnqueueOutcome, FetchKind, FetchReason, FollowState, Following, NewFetch, Store, TombstoneKind,
 };
 use tinyindex::TinyIndex;
 use tokio::sync::watch;
@@ -31,6 +30,7 @@ use tokio::task::JoinSet;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
+use crate::admin_app::AdminApp;
 use crate::config::{Config, ENV_CONFIG_PATH};
 use crate::crawl_app::CrawlApp;
 use crate::decide::Action;
@@ -45,6 +45,7 @@ use crate::inbox_app::{FOLLOW_MAINTENANCE_EVERY, FollowSettings, InboxApp};
 use crate::keys::load_or_generate;
 use crate::metrics::{self, MetricsState};
 use crate::now_secs;
+use crate::registrations;
 use crate::search;
 use crate::sweep::{SweepConfig, run_index, step_interval};
 use crate::worker::{
@@ -414,6 +415,7 @@ async fn serve_with_lock(
         root_redirect: config.root_redirect.clone(),
     })
     .merge(fasp.routes())
+    .merge(admin_routes(&config, &fasp))
     .merge(inbox.routes())
     .merge(crawl_routes(&config, &handle)?);
     if config.metrics {
@@ -464,6 +466,18 @@ fn crawl_routes(config: &Config, handle: &WriterHandle) -> anyhow::Result<axum::
         );
     }
     Ok(CrawlApp::new(open_store(config)?, handle.tombstones(), config).routes())
+}
+
+/// The admin API, which answers 404 unless `admin_tokens` are configured. It shares the FASP
+/// state's store connection and HTTP client.
+fn admin_routes(config: &Config, fasp: &FaspApp) -> axum::Router {
+    if !config.admin_tokens.0.is_empty() {
+        tracing::info!(
+            tokens = config.admin_tokens.0.len(),
+            "serving the admin API"
+        );
+    }
+    AdminApp::new(fasp.clone(), config).routes()
 }
 
 fn follow_settings(config: &Config) -> anyhow::Result<FollowSettings> {
@@ -777,26 +791,11 @@ pub async fn register(
     server_url: &str,
     fasp_base_url: Option<&str>,
 ) -> anyhow::Result<RegistrationOutcome> {
-    let our_base_url = config.require_base_url()?;
-    let our_base =
-        Url::parse(our_base_url).with_context(|| format!("bad base_url {our_base_url}"))?;
-    let server = Url::parse(server_url).with_context(|| format!("{server_url:?} is not a URL"))?;
-    let fasp_base = fasp_base_url
-        .map(|url| Url::parse(url).with_context(|| format!("{url:?} is not a URL")))
-        .transpose()?;
     let store = std::sync::Mutex::new(open_store(config)?);
-    let http = http_client(our_base_url)?;
-    fasp_register(
-        &http,
-        &store,
-        &config.name,
-        &our_base,
-        &server,
-        fasp_base.as_ref(),
-        now_secs(),
-    )
-    .await
-    .with_context(|| format!("failed to register with {server_url}"))
+    let http = http_client(config.require_base_url()?)?;
+    registrations::register_server(&http, &store, config, server_url, fasp_base_url, now_secs())
+        .await
+        .with_context(|| format!("failed to register with {server_url}"))
 }
 
 /// What `register` prints: the fingerprint to compare, the link to approve at, and what to do
@@ -819,53 +818,13 @@ pub fn registration_report(outcome: &RegistrationOutcome, our_base_url: &str) ->
 }
 
 fn registrations(config: &Config) -> anyhow::Result<Value> {
-    let store = open_store(config)?;
-    let mut out = Vec::new();
-    for registration in store.list_registrations()? {
-        let capabilities: Vec<String> = store
-            .enabled_capabilities(registration.id)?
-            .into_iter()
-            .map(|(id, version)| format!("{id}@{version}"))
-            .collect();
-        out.push(json!({
-            "id": registration.id,
-            "base_url": registration.base_url,
-            "status": registration.status.as_str(),
-            "capabilities": capabilities,
-            "created_at": registration.created_at,
-        }));
-    }
-    Ok(Value::Array(out))
+    Ok(registrations::list_registrations(&open_store(config)?)?)
 }
 
-/// Marks a registration revoked, disables its capabilities and deletes its subscription and
-/// backfill rows. There is no remote call: the FASP spec has no unregister endpoint, and a
-/// revoked registration's requests get 401 from then on.
+/// Revokes a registration: see [`registrations::revoke_registration`].
 pub fn unregister(config: &Config, id: i64) -> anyhow::Result<Value> {
-    let store = open_store(config)?;
-    let registration = store
-        .registration(id)?
-        .with_context(|| format!("there is no registration with id {id}"))?;
-    store.set_registration_status(id, RegistrationStatus::Revoked)?;
-    let now = now_secs();
-    for (capability, version) in store.enabled_capabilities(id)? {
-        store.set_capability(id, &capability, &version, false, now)?;
-    }
-    let subscriptions = store.delete_subscriptions(id)?;
-    let backfills = store.delete_backfills(id)?;
-    tracing::info!(
-        registration = id,
-        host = registration.base_url,
-        "registration revoked"
-    );
-    Ok(json!({
-        "id": id,
-        "base_url": registration.base_url,
-        "status": "revoked",
-        "subscriptions_deleted": subscriptions,
-        "backfills_deleted": backfills,
-        "note": "the server was not contacted; remove the provider on its side too",
-    }))
+    registrations::revoke_registration(&open_store(config)?, id, now_secs())?
+        .with_context(|| format!("there is no registration with id {id}"))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1142,6 +1101,7 @@ fn stats(config: &Config) -> anyhow::Result<Value> {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
+    use store::RegistrationStatus;
 
     use super::*;
 

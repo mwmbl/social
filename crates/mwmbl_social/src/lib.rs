@@ -16,6 +16,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 pub mod activities;
+pub mod admin_app;
 pub mod cli;
 pub mod config;
 pub mod context;
@@ -33,6 +34,7 @@ pub mod operator;
 pub mod outbox;
 pub mod pacing;
 pub mod records;
+pub mod registrations;
 pub mod robots;
 pub mod search;
 pub mod sweep;
