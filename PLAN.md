@@ -584,7 +584,9 @@ removes it.
   queue is below 50% of the cap. One task per registration at a time; failures are logged with
   the host.
 - CLI: `register <server-url> [--fasp-base-url URL]` (prints fingerprint, approval link, next
-  step; SQLite and outbound HTTP only, no writer lock), `registrations` (JSON, never keys),
+  step; SQLite and outbound HTTP only, no writer lock; the URL must be `https`, `http` only with
+  `allow_http`, without user info), `registrations` (JSON with our key's fingerprint, never
+  keys),
   `unregister <id>` (marks revoked, disables its capabilities, deletes its subscription and
   backfill rows; no remote call; its requests get 401). `stats` reports registrations by status
   and enabled capabilities.
@@ -1057,7 +1059,20 @@ Consent is the lead message: the fediverse has rejected search projects before.
 - An admin API, `POST /api/v1/admin/registrations` (and list/revoke), doing what the
   `register`/`registrations`/`unregister` CLI commands do, behind bearer tokens from
   `admin_tokens` (like `crawl_tokens`; none turns it off). It returns the key fingerprint and
-  the approval link for the operator's UI to show.
+  the approval link for the operator's UI to show. Built in `mwmbl_social::admin_app`; the
+  commands and the API share `mwmbl_social::registrations`, and the token check is shared with
+  crawl submissions (`mwmbl_social::operator`). It runs inside `serve` on the FASP state's
+  store connection and HTTP client, and writes only SQLite, like the commands.
+  - `POST` takes `{"server_url", "fasp_base_url"?}` and answers 201 with `{id, base_url,
+    status, capabilities, fingerprint, created_at, approval_url}` (`base_url` is the server's
+    FASP base URL, `approval_url` its `registrationCompletionUri`). 400 for an unusable URL,
+    409 with the existing `id` when that server is already registered, 502 when it can't be
+    reached, isn't a FASP host or refuses, 422 for any other body.
+  - `GET` lists, and `GET`/`DELETE .../{id}` read or revoke one (404 if unknown), with the same
+    fields minus `approval_url`: the server sends that link once, and it is not stored, so the
+    operator's UI keeps it.
+  - A revoked registration still counts as "already registered" (409), as for `register`:
+    re-registering a server after `DELETE` needs its row removed first. Not solved yet.
 
 **Hosted sign-up (in Mwmbl).** A logged-in Mwmbl user enters their server's URL; Mwmbl
 rate-limits per user and per target host, then calls the admin API and shows the fingerprint and

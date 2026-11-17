@@ -70,7 +70,7 @@ be served at the root of its host.
    starts a backfill of recent public content and subscribes to trending events.
 
 `mwmbl-social registrations` lists registrations and `mwmbl-social unregister <id>` revokes
-one.
+one. To offer sign-up from your own site, use the [admin API](#admin-api) instead.
 
 ## Configuration
 
@@ -84,6 +84,8 @@ set from the environment as `MWMBL_SOCIAL_<FIELD>`, for example `MWMBL_SOCIAL_BA
 | `data_dir` | `./data` | SQLite, the two index files and our keys |
 | `name` | `Mwmbl Social` | Shown to admins in their FASP list |
 | `contact_email`, `privacy_policy_url`, `fediverse_account` | unset | Shown in `provider_info` |
+| `sign_in_url` | unset | Where server admins sign in to manage their account with you; sent as `signInUrl` in `provider_info` |
+| `root_redirect` | unset | `GET /` answers a 302 to this URL; unset, `/` is a 404 |
 | `actor_username` | `mwmbl-social` | Our server actor's `preferredUsername` |
 | `posts_pages`, `accounts_pages` | 65536, 16384 | Index size in 4 KiB pages; full pages drop their lowest-scored items |
 | `sweep_period_secs` | 6 days | One full revalidation pass over each index |
@@ -95,6 +97,7 @@ set from the environment as `MWMBL_SOCIAL_<FIELD>`, for example `MWMBL_SOCIAL_BA
 | `follow` | `[]` | Communities or accounts to follow, e.g. `["!rust@lemmy.example"]`; env: comma-separated |
 | `outbox_backfill_pages` | 5 | Outbox pages read when a follow is accepted; 0 turns it off |
 | `crawl_tokens` | `[]` | Bearer tokens for crawl submissions (at least 16 characters each); none turns the endpoint off. Env: comma-separated |
+| `admin_tokens` | `[]` | Bearer tokens for the admin API, as for `crawl_tokens`; none turns it off. Env: comma-separated |
 
 ## Following communities
 
@@ -128,6 +131,29 @@ curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 - Before fetching, we check the host's nodeinfo says Lemmy (anything else is dropped) and that
   its robots.txt allows the URI for `mwmbl-social`. Fetches to a host are spaced by its
   `Crawl-delay` (at most 300 s). Authors still need consent; see PLAN.md Stage 3.
+
+## Admin API
+
+For an operator's own sign-up page: it does what `register`, `registrations` and `unregister`
+do. Set `admin_tokens` to turn it on, and call it server-side only.
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"server_url": "https://mastodon.example"}' https://social.example/api/v1/admin/registrations
+# 201 {"id": 4, "base_url": "https://mastodon.example/api/fasp", "status": "pending",
+#      "capabilities": [], "fingerprint": "…", "created_at": 1763337600,
+#      "approval_url": "https://mastodon.example/admin/…"}
+```
+
+- Show the admin the `fingerprint` and `approval_url`. The approval link is only in this
+  response, so keep it. `fasp_base_url` may be added when nodeinfo doesn't lead to it.
+- 400 for an unusable URL (`https` only), 409 (with the existing `id`) if the server is already
+  registered, 502 if it can't be reached or doesn't accept the registration, 422 for any other
+  body.
+- `GET /api/v1/admin/registrations` lists registrations, `GET .../{id}` shows one (its `status`
+  becomes `active` once the server first calls us), and `DELETE .../{id}` revokes it. Unknown
+  ids get 404.
+- 404 for every route when no `admin_tokens` are set, 401 on a bad token.
 
 ## Removing content
 
