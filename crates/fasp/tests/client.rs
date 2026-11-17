@@ -52,8 +52,13 @@ async fn every_call_rechecks_the_capability() {
         .with_store(|s| s.set_capability(id, "data_sharing", "0.1", false, 2))
         .unwrap();
     assert!(matches!(
-        ds.subscribe(Category::Content, SubscriptionType::Lifecycle, Some(20))
-            .await,
+        ds.subscribe(
+            Category::Content,
+            SubscriptionType::Lifecycle,
+            Some(20),
+            None
+        )
+        .await,
         Err(ClientError::NotEnabled(_))
     ));
     assert!(matches!(
@@ -79,7 +84,12 @@ async fn data_sharing_calls_are_signed_and_ids_become_strings() {
     let ds = client.data_sharing().unwrap();
 
     let sub = ds
-        .subscribe(Category::Account, SubscriptionType::Lifecycle, Some(25))
+        .subscribe(
+            Category::Account,
+            SubscriptionType::Lifecycle,
+            Some(25),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(sub, "11", "numeric id from the server, as a string");
@@ -151,7 +161,12 @@ async fn response_verification_failures_are_errors() {
         .tamper_signature
         .store(true, Ordering::SeqCst);
     let err = ds
-        .subscribe(Category::Content, SubscriptionType::Lifecycle, Some(20))
+        .subscribe(
+            Category::Content,
+            SubscriptionType::Lifecycle,
+            Some(20),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(

@@ -16,6 +16,16 @@ pub const ACCOUNT_SEARCH_ID: &str = "account_search";
 /// part (`0`); both spellings are accepted and stored under this one.
 pub const ACCOUNT_SEARCH_VERSION: &str = "0.1";
 
+/// Identifier of the `trends` capability.
+pub const TRENDS_ID: &str = "trends";
+/// The version of `trends` we advertise; activation at `0` or `0.1` is accepted.
+pub const TRENDS_VERSION: &str = "0.1";
+
+/// Identifier of the `follow_recommendation` capability.
+pub const FOLLOW_RECOMMENDATION_ID: &str = "follow_recommendation";
+/// The version of `follow_recommendation` we advertise; activation at `0` or `0.1` is accepted.
+pub const FOLLOW_RECOMMENDATION_VERSION: &str = "0.1";
+
 /// A capability we advertise in `provider_info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capability {

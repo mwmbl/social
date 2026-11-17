@@ -10,12 +10,25 @@ pub const MAX_OBJECT_URIS: usize = 1000;
 /// Longest URI we accept; longer ones are ignored.
 pub const MAX_URI_LEN: usize = 2048;
 
-/// A lifecycle event type we act on. `trending` announcements are dropped while parsing.
+/// An event type: the three `lifecycle` ones, or `trending` from a `trends` subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventType {
     New,
     Update,
     Delete,
+    /// The object had recent interactions above the subscription's threshold.
+    Trending,
+}
+
+impl EventType {
+    /// The subscription type whose announcements carry this event.
+    #[must_use]
+    pub const fn subscription_type(self) -> store::SubscriptionType {
+        match self {
+            Self::New | Self::Update | Self::Delete => store::SubscriptionType::Lifecycle,
+            Self::Trending => store::SubscriptionType::Trends,
+        }
+    }
 }
 
 /// What the announcement answers.
@@ -104,7 +117,8 @@ fn clean_uris(raw: Vec<serde_json::Value>) -> Vec<String> {
 
 /// Parses an announcement body.
 ///
-/// `Ok(None)` means a well-formed `trending` event, which we never asked for and drop. Ids may
+/// `Ok(None)` means a well-formed announcement we drop: a `trending` event for the `account`
+/// category, which the spec does not define (`trends` applies to `content` only). Ids may
 /// be strings (the spec) or numbers. A subscription announcement needs an `eventType`; a
 /// backfill announcement without `moreObjectsAvailable` counts as having no more.
 pub fn parse_announcement(body: &[u8]) -> Result<Option<Announcement>, AnnouncementError> {
@@ -120,7 +134,8 @@ pub fn parse_announcement(body: &[u8]) -> Result<Option<Announcement>, Announcem
                 Some("new") => EventType::New,
                 Some("update") => EventType::Update,
                 Some("delete") => EventType::Delete,
-                Some("trending") => return Ok(None),
+                Some("trending") if category == Category::Account => return Ok(None),
+                Some("trending") => EventType::Trending,
                 Some(other) => return Err(malformed(format!("unknown eventType `{other}`"))),
                 None => return Err(malformed("subscription announcement has no eventType")),
             };
@@ -199,12 +214,26 @@ mod tests {
     }
 
     #[test]
-    fn trending_is_dropped_but_valid() {
+    fn trending_content_is_an_event_and_trending_accounts_are_dropped() {
         let a = parse(
             r#"{"source":{"subscription":{"id":"1"}},"category":"content",
                 "eventType":"trending","objectUris":["https://a.example/1"]}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            a.source,
+            AnnouncementSource::Subscription {
+                remote_id: "1".into(),
+                event: EventType::Trending
+            }
         );
-        assert_eq!(a, Ok(None));
+        assert_eq!(a.object_uris, ["https://a.example/1"]);
+        let b = parse(
+            r#"{"source":{"subscription":{"id":"1"}},"category":"account",
+                "eventType":"trending","objectUris":["https://a.example/u"]}"#,
+        );
+        assert_eq!(b, Ok(None));
     }
 
     #[test]

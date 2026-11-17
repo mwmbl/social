@@ -19,6 +19,7 @@ use serde_json::{Map, Value, json};
 use store::{Category, Registration, SubscriptionType};
 use url::Url;
 
+use crate::data_sharing::TrendsThreshold;
 use crate::error::{ClientError, NotEnabled};
 use crate::{DATA_SHARING_ID, DATA_SHARING_VERSION, StoreAccess, system_now};
 
@@ -366,17 +367,30 @@ impl<S: StoreAccess> DataSharingClient<'_, S> {
     }
 
     /// `POST /data_sharing/v0/event_subscriptions`; returns the server's id for it.
+    /// `threshold` is sent only for a `trends` subscription.
     pub async fn subscribe(
         &self,
         category: Category,
         subscription_type: SubscriptionType,
         max_batch_size: Option<u32>,
+        threshold: Option<&TrendsThreshold>,
     ) -> Result<String, ClientError> {
         let mut body = Map::new();
         body.insert("category".into(), json!(category.as_str()));
         body.insert("subscriptionType".into(), json!(subscription_type.as_str()));
         if let Some(size) = max_batch_size {
             body.insert("maxBatchSize".into(), json!(size));
+        }
+        if let Some(t) = threshold.filter(|_| subscription_type == SubscriptionType::Trends) {
+            body.insert(
+                "threshold".into(),
+                json!({
+                    "timeframe": t.timeframe_minutes,
+                    "shares": t.shares,
+                    "likes": t.likes,
+                    "replies": t.replies,
+                }),
+            );
         }
         let (url, bytes) = self
             .create(

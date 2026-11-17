@@ -2,7 +2,8 @@
 //!
 //! - [`registration`]: discover a server's FASP base URL and register with it (we initiate).
 //! - [`http`]: the axum router serving our FASP endpoints (`provider_info`, capability
-//!   activation, `data_sharing` announcements), with request authentication and response signing.
+//!   activation, `data_sharing` announcements, `account_search`, `trends` and
+//!   `follow_recommendation`), with request authentication and response signing.
 //! - [`client`]: a signed client for one registration's FASP API. It refuses to call a
 //!   capability's API unless the store says that capability is enabled (CLAUDE.md principle 4).
 //! - [`data_sharing`]: the orchestration the binary runs when `data_sharing` is switched on or
@@ -40,5 +41,6 @@ pub use access::StoreAccess;
 pub use error::{ClientError, NotEnabled, RegistrationError};
 pub use types::{
     ACCOUNT_SEARCH_ID, ACCOUNT_SEARCH_VERSION, Capability, DATA_SHARING_ID, DATA_SHARING_VERSION,
-    PrivacyPolicy, ProviderInfoConfig, system_now,
+    FOLLOW_RECOMMENDATION_ID, FOLLOW_RECOMMENDATION_VERSION, PrivacyPolicy, ProviderInfoConfig,
+    TRENDS_ID, TRENDS_VERSION, system_now,
 };

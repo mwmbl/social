@@ -456,6 +456,53 @@ async fn announcements_are_dropped_with_204_when_not_ours_or_not_enabled() {
 }
 
 #[tokio::test]
+async fn trending_events_are_handed_over_only_from_a_trends_subscription() {
+    let env = Env::new().await;
+    set_up_sources(&env);
+    let id = env.outcome.registration_id;
+    env.ours
+        .state
+        .with_store(|s| {
+            s.add_subscription(id, "13", Category::Content, SubscriptionType::Trends, 1)
+        })
+        .unwrap();
+    env.enable_data_sharing_in_store();
+    let sub = |id: &str| json!({"subscription": {"id": id}});
+    let trending = json!({"eventType": "trending", "objectUris": ["https://a.example/1"]});
+    let new = json!({"eventType": "new", "objectUris": ["https://a.example/2"]});
+    // Wrong pairings are dropped: trending on the lifecycle subscription, new on the trends one.
+    assert_eq!(
+        announce(&env, &announcement_body(&sub("12"), trending.clone()))
+            .await
+            .status,
+        204
+    );
+    assert_eq!(
+        announce(&env, &announcement_body(&sub("13"), new))
+            .await
+            .status,
+        204
+    );
+    assert!(received(&env).is_empty());
+    assert_eq!(
+        announce(&env, &announcement_body(&sub("13"), trending))
+            .await
+            .status,
+        204
+    );
+    let got = received(&env);
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        got[0].1.source,
+        AnnouncementSource::Subscription {
+            remote_id: "13".into(),
+            event: EventType::Trending
+        }
+    );
+    assert_eq!(got[0].1.object_uris, ["https://a.example/1"]);
+}
+
+#[tokio::test]
 async fn another_registrations_source_ids_do_not_count() {
     let env = Env::new().await;
     env.enable_data_sharing_in_store();

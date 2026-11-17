@@ -65,6 +65,48 @@ pub trait FaspState: StoreAccess + 'static {
         async { Err("account_search is not implemented".to_owned()) }
     }
 
+    /// Trending content for a registration that has `trends` enabled, best first, at most
+    /// `query.max_count`. Ranks must be in 1..=100 and comparable across instances of the
+    /// same software (the spec's rule for merging FASP results).
+    fn trending_content(
+        &self,
+        _registration_id: i64,
+        _query: &TrendsQuery,
+    ) -> impl Future<Output = Result<Vec<TrendingContent>, String>> + Send {
+        async { Err("trends is not implemented".to_owned()) }
+    }
+
+    /// Trending hashtags, as [`FaspState::trending_content`].
+    fn trending_hashtags(
+        &self,
+        _registration_id: i64,
+        _query: &TrendsQuery,
+    ) -> impl Future<Output = Result<Vec<TrendingTag>, String>> + Send {
+        async { Err("trends is not implemented".to_owned()) }
+    }
+
+    /// Trending links, as [`FaspState::trending_content`]. The default is none, which is the
+    /// honest answer for a state that does not see links.
+    fn trending_links(
+        &self,
+        _registration_id: i64,
+        _query: &TrendsQuery,
+    ) -> impl Future<Output = Result<Vec<TrendingLink>, String>> + Send {
+        async { Ok(Vec::new()) }
+    }
+
+    /// Accounts to recommend to the account `account_uri` (actor URIs, best first), for a
+    /// registration that has `follow_recommendation` enabled. The account URI identifies a
+    /// person, so implementations must not log it.
+    fn follow_recommendations(
+        &self,
+        _registration_id: i64,
+        _account_uri: &str,
+        _language: Option<&str>,
+    ) -> impl Future<Output = Result<Vec<String>, String>> + Send {
+        async { Err("follow_recommendation is not implemented".to_owned()) }
+    }
+
     /// A capability was activated or deactivated by the server (already recorded in the
     /// store, under the id and the version we advertise). Called on every activation request,
     /// including repeats, so the handler must be idempotent. The binary starts or stops
@@ -93,6 +135,43 @@ pub struct AccountSearchPage {
     pub uris: Vec<String>,
     /// Whether more results follow this page.
     pub has_more: bool,
+}
+
+/// The validated common parameters of a `trends` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrendsQuery {
+    /// 1..=[`MAX_WITHIN_LAST_HOURS`]; larger requests are clamped (the spec only requires 168).
+    pub within_last_hours: u32,
+    /// 1..=100.
+    pub max_count: usize,
+    /// A BCP 47 range for RFC 4647 basic filtering.
+    pub language: Option<String>,
+}
+
+/// The longest `withinLastHours` we serve: the spec's required week.
+pub const MAX_WITHIN_LAST_HOURS: u32 = 168;
+
+/// One entry of `GET /trends/v0/content`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TrendingContent {
+    pub uri: String,
+    pub rank: u8,
+}
+
+/// One entry of `GET /trends/v0/hashtags`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TrendingTag {
+    pub name: String,
+    pub rank: u8,
+    pub examples: Vec<String>,
+}
+
+/// One entry of `GET /trends/v0/links`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TrendingLink {
+    pub url: String,
+    pub rank: u8,
+    pub examples: Vec<String>,
 }
 
 /// Every capability we advertise: `data_sharing` plus the state's extras.

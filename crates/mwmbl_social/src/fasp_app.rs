@@ -256,6 +256,7 @@ impl FaspApp {
             &*self.inner.store,
             now_secs(),
             self.inner.backfill_max_count,
+            None,
         )
         .await;
         if let Err(e) = result {

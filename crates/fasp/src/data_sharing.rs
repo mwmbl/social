@@ -17,6 +17,29 @@ const CATEGORIES: [Category; 2] = [Category::Content, Category::Account];
 /// URI each anyway.
 pub const MAX_BATCH_SIZE: u32 = 20;
 
+/// The `threshold` of our `trends` subscription: the server announces an object as
+/// `trending` once it has this many shares, likes or replies within `timeframe_minutes`. The
+/// defaults are the spec's. Mastodon stores whatever we send and announces one `trending`
+/// event per interaction while the count stays at or above the threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrendsThreshold {
+    pub timeframe_minutes: u32,
+    pub shares: u32,
+    pub likes: u32,
+    pub replies: u32,
+}
+
+impl Default for TrendsThreshold {
+    fn default() -> Self {
+        Self {
+            timeframe_minutes: 15,
+            shares: 3,
+            likes: 3,
+            replies: 3,
+        }
+    }
+}
+
 /// What [`on_enable`] created in this run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EnableOutcome {
@@ -49,6 +72,7 @@ pub enum BackfillProgress {
 
 /// Switches `data_sharing` on for the client's registration: one `lifecycle` subscription and
 /// one backfill request (for up to `max_count` objects) for each of `content` and `account`,
+/// plus, when `trends` is given, one `content` `trends` subscription with that threshold,
 /// skipping any already recorded. Safe to call again after a partial failure: each step is
 /// recorded as soon as the server accepts it.
 pub async fn on_enable<S: StoreAccess>(
@@ -56,6 +80,7 @@ pub async fn on_enable<S: StoreAccess>(
     store: &S,
     now: i64,
     max_count: u32,
+    trends: Option<TrendsThreshold>,
 ) -> Result<EnableOutcome, ClientError> {
     let registration_id = client.registration_id();
     let data_sharing = client.data_sharing()?;
@@ -85,7 +110,12 @@ pub async fn on_enable<S: StoreAccess>(
             .any(|s| s.category == category && s.subscription_type == SubscriptionType::Lifecycle);
         if !has_subscription {
             let remote_id = data_sharing
-                .subscribe(category, SubscriptionType::Lifecycle, Some(MAX_BATCH_SIZE))
+                .subscribe(
+                    category,
+                    SubscriptionType::Lifecycle,
+                    Some(MAX_BATCH_SIZE),
+                    None,
+                )
                 .await?;
             store.with_store(|s| {
                 s.add_subscription(
@@ -93,6 +123,34 @@ pub async fn on_enable<S: StoreAccess>(
                     &remote_id,
                     category,
                     SubscriptionType::Lifecycle,
+                    now,
+                )
+            })?;
+            outcome.subscriptions_created += 1;
+        }
+    }
+    if let Some(threshold) = trends {
+        let has_trends = store
+            .with_store(|s| s.list_subscriptions(registration_id))?
+            .iter()
+            .any(|s| {
+                s.category == Category::Content && s.subscription_type == SubscriptionType::Trends
+            });
+        if !has_trends {
+            let remote_id = data_sharing
+                .subscribe(
+                    Category::Content,
+                    SubscriptionType::Trends,
+                    Some(MAX_BATCH_SIZE),
+                    Some(&threshold),
+                )
+                .await?;
+            store.with_store(|s| {
+                s.add_subscription(
+                    registration_id,
+                    &remote_id,
+                    Category::Content,
+                    SubscriptionType::Trends,
                     now,
                 )
             })?;

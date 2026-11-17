@@ -8,7 +8,8 @@ use common::Env;
 use fasp::ClientError;
 use fasp::StoreAccess;
 use fasp::data_sharing::{
-    BackfillProgress, on_backfill_announcement, on_disable, on_enable, resume_backfills,
+    BackfillProgress, TrendsThreshold, on_backfill_announcement, on_disable, on_enable,
+    resume_backfills,
 };
 use serde_json::json;
 use store::{BackfillState, Category, SubscriptionType};
@@ -20,7 +21,9 @@ async fn on_enable_creates_two_subscriptions_and_two_backfills_once() {
     let client = env.client();
     let id = env.outcome.registration_id;
 
-    let outcome = on_enable(&client, &*env.ours.state, 77, 250).await.unwrap();
+    let outcome = on_enable(&client, &*env.ours.state, 77, 250, None)
+        .await
+        .unwrap();
     assert_eq!(outcome.subscriptions_created, 2);
     assert_eq!(outcome.backfills_created, 2);
 
@@ -75,7 +78,9 @@ async fn on_enable_creates_two_subscriptions_and_two_backfills_once() {
 
     // Calling it again (e.g. a repeated activation) creates nothing.
     let before = env.mastodon.request_count();
-    let again = on_enable(&client, &*env.ours.state, 78, 250).await.unwrap();
+    let again = on_enable(&client, &*env.ours.state, 78, 250, None)
+        .await
+        .unwrap();
     assert_eq!(
         (again.subscriptions_created, again.backfills_created),
         (0, 0)
@@ -84,10 +89,60 @@ async fn on_enable_creates_two_subscriptions_and_two_backfills_once() {
 }
 
 #[tokio::test]
+async fn on_enable_with_trends_adds_one_content_trends_subscription_with_the_threshold() {
+    let env = Env::new().await;
+    env.enable_data_sharing_in_store();
+    let client = env.client();
+    let id = env.outcome.registration_id;
+    let threshold = TrendsThreshold {
+        timeframe_minutes: 30,
+        shares: 4,
+        likes: 5,
+        replies: 6,
+    };
+    let outcome = on_enable(&client, &*env.ours.state, 1, 10, Some(threshold))
+        .await
+        .unwrap();
+    assert_eq!(outcome.subscriptions_created, 3);
+    let bodies = env
+        .mastodon
+        .inner
+        .subscription_bodies
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        bodies.last().unwrap(),
+        &json!({"category": "content", "subscriptionType": "trends", "maxBatchSize": 20,
+            "threshold": {"timeframe": 30, "shares": 4, "likes": 5, "replies": 6}})
+    );
+    let subs = env
+        .ours
+        .state
+        .with_store(|s| s.list_subscriptions(id))
+        .unwrap();
+    let trends: Vec<_> = subs
+        .iter()
+        .filter(|s| s.subscription_type == SubscriptionType::Trends)
+        .collect();
+    assert_eq!(trends.len(), 1);
+    assert_eq!(trends[0].category, Category::Content);
+
+    // An existing deployment (lifecycle only) gets just the trends subscription added.
+    let before = env.mastodon.request_count();
+    let again = on_enable(&client, &*env.ours.state, 2, 10, Some(threshold))
+        .await
+        .unwrap();
+    assert_eq!(again.subscriptions_created, 0);
+    assert_eq!(env.mastodon.request_count(), before);
+    assert_eq!(TrendsThreshold::default().timeframe_minutes, 15);
+}
+
+#[tokio::test]
 async fn on_enable_requires_the_capability() {
     let env = Env::new().await;
     let client = env.client();
-    let err = on_enable(&client, &*env.ours.state, 1, 10)
+    let err = on_enable(&client, &*env.ours.state, 1, 10, None)
         .await
         .unwrap_err();
     assert!(matches!(err, ClientError::NotEnabled(_)), "{err}");
@@ -100,7 +155,9 @@ async fn on_disable_makes_no_calls_and_re_enable_deletes_the_orphans() {
     env.enable_data_sharing_in_store();
     let client = env.client();
     let id = env.outcome.registration_id;
-    on_enable(&client, &*env.ours.state, 1, 10).await.unwrap();
+    on_enable(&client, &*env.ours.state, 1, 10, None)
+        .await
+        .unwrap();
     let calls = env.mastodon.request_count();
     assert_eq!(calls, 4);
 
@@ -136,7 +193,9 @@ async fn on_disable_makes_no_calls_and_re_enable_deletes_the_orphans() {
     // Mastodon keeps the old subscriptions when the capability is disabled, so re-enabling
     // first deletes them on the server (now that calls are allowed), then subscribes afresh.
     let before = env.mastodon.request_count();
-    let outcome = on_enable(&client, &*env.ours.state, 2, 10).await.unwrap();
+    let outcome = on_enable(&client, &*env.ours.state, 2, 10, None)
+        .await
+        .unwrap();
     assert_eq!(
         (
             outcome.orphans_deleted,
@@ -165,7 +224,9 @@ async fn enabled_env() -> (Env, fasp::client::FaspClient<common::TestState>) {
     let env = Env::new().await;
     env.enable_data_sharing_in_store();
     let client = env.client();
-    on_enable(&client, &*env.ours.state, 1, 10).await.unwrap();
+    on_enable(&client, &*env.ours.state, 1, 10, None)
+        .await
+        .unwrap();
     (env, client)
 }
 

@@ -6,11 +6,12 @@ use serde::Serialize;
 use store::Registration;
 
 use super::respond::Reply;
-use super::{FaspState, capabilities};
+use super::{FaspState, MAX_WITHIN_LAST_HOURS, TrendsQuery, capabilities};
 use crate::announcement::{Announcement, AnnouncementSource, parse_announcement};
 use crate::{
     ACCOUNT_SEARCH_ID, ACCOUNT_SEARCH_VERSION, Capability, DATA_SHARING_ID, DATA_SHARING_VERSION,
-    PrivacyPolicy,
+    FOLLOW_RECOMMENDATION_ID, FOLLOW_RECOMMENDATION_VERSION, PrivacyPolicy, TRENDS_ID,
+    TRENDS_VERSION,
 };
 
 pub(crate) async fn route<S: FaspState>(
@@ -33,12 +34,20 @@ pub(crate) async fn route<S: FaspState>(
         ("GET", ["account_search", "v0", "search"]) => {
             account_search(state, registration, parts.uri.query().unwrap_or("")).await
         }
+        ("GET", ["trends", "v0", kind @ ("content" | "hashtags" | "links")]) => {
+            trends(state, registration, kind, parts.uri.query().unwrap_or("")).await
+        }
+        ("GET", ["follow_recommendation", "v0", "accounts"]) => {
+            follow_recommendation(state, registration, parts.uri.query().unwrap_or("")).await
+        }
         (
             _,
             ["provider_info"]
             | ["capabilities", _, _, "activation"]
             | ["data_sharing", "v0", "announcements"]
-            | ["account_search", "v0", "search"],
+            | ["account_search", "v0", "search"]
+            | ["trends", "v0", "content" | "hashtags" | "links"]
+            | ["follow_recommendation", "v0", "accounts"],
         ) => Reply::error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
         _ => Reply::error(StatusCode::NOT_FOUND, "not found"),
     }
@@ -115,18 +124,20 @@ async fn activation<S: FaspState>(
     Reply::no_content()
 }
 
-/// Whether this announcement's source is one of the registration's own subscriptions or
-/// backfills.
+/// Whether this announcement's source is one of the registration's own subscriptions (of the
+/// type its event belongs to: `trending` only from a `trends` subscription, the rest only from
+/// a `lifecycle` one) or backfills.
 fn is_own_source<S: FaspState>(
     state: &S,
     registration_id: i64,
     announcement: &Announcement,
 ) -> Result<bool, store::StoreError> {
     state.with_store(|s| match &announcement.source {
-        AnnouncementSource::Subscription { remote_id, .. } => Ok(s
-            .list_subscriptions(registration_id)?
-            .iter()
-            .any(|sub| &sub.remote_id == remote_id)),
+        AnnouncementSource::Subscription { remote_id, event } => {
+            Ok(s.list_subscriptions(registration_id)?.iter().any(|sub| {
+                &sub.remote_id == remote_id && sub.subscription_type == event.subscription_type()
+            }))
+        }
         AnnouncementSource::Backfill { remote_id, .. } => Ok(s
             .list_backfills(registration_id)?
             .iter()
@@ -135,8 +146,8 @@ fn is_own_source<S: FaspState>(
 }
 
 /// `POST /data_sharing/v0/announcements`. Malformed bodies get 422. Everything else gets 204,
-/// including announcements we drop (`data_sharing` not enabled, an id that is not ours, trending
-/// events), since the server cannot do anything useful with an error.
+/// including announcements we drop (`data_sharing` not enabled, an id that is not ours or of
+/// the wrong subscription type, trending accounts), since the server cannot do anything useful with an error.
 async fn announcements<S: FaspState>(state: &S, registration: &Registration, body: &[u8]) -> Reply {
     let announcement = match parse_announcement(body) {
         Ok(Some(announcement)) => announcement,
@@ -259,6 +270,163 @@ fn next_page_url(base_url: &str, params: &SearchParams) -> String {
         base_url.trim_end_matches('/'),
         query.finish()
     )
+}
+
+/// `Ok(())` when the registration has the capability enabled; otherwise the reply to send:
+/// a signed 404, or a 500 when the store fails.
+fn require_enabled<S: FaspState>(
+    state: &S,
+    registration: &Registration,
+    id: &str,
+    version: &str,
+) -> Result<(), Reply> {
+    match state.with_store(|s| s.capability_enabled(registration.id, id, version)) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            tracing::info!(
+                registration = registration.id,
+                host = registration.base_url,
+                capability = id,
+                "refused a request: capability is not enabled"
+            );
+            Err(Reply::error(
+                StatusCode::NOT_FOUND,
+                "capability is not enabled",
+            ))
+        }
+        Err(e) => Err(store_failure(registration, &e)),
+    }
+}
+
+/// The `trends` defaults from the spec.
+const DEFAULT_WITHIN_LAST_HOURS: u32 = 24;
+const DEFAULT_MAX_COUNT: usize = 20;
+
+/// Parses the spec's common `trends` options. Each must be a positive integer when present;
+/// `withinLastHours` beyond what we keep is clamped, `maxCount` is capped at [`MAX_LIMIT`].
+fn parse_trends_query(query: &str) -> Result<TrendsQuery, &'static str> {
+    let (mut hours, mut count, mut language) = (None, None, None);
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        let slot = match key.as_ref() {
+            "withinLastHours" => &mut hours,
+            "maxCount" => &mut count,
+            "language" => &mut language,
+            _ => continue,
+        };
+        slot.get_or_insert(value.into_owned());
+    }
+    let within_last_hours = match hours {
+        None => DEFAULT_WITHIN_LAST_HOURS,
+        Some(v) => match parse_count(&v) {
+            Some(n) if n > 0 => u32::try_from(n)
+                .unwrap_or(u32::MAX)
+                .min(MAX_WITHIN_LAST_HOURS),
+            _ => return Err("withinLastHours must be a positive integer"),
+        },
+    };
+    let max_count = match count {
+        None => DEFAULT_MAX_COUNT,
+        Some(v) => match parse_count(&v) {
+            Some(n) if n > 0 => n.min(MAX_LIMIT),
+            _ => return Err("maxCount must be a positive integer"),
+        },
+    };
+    let language = language
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty());
+    Ok(TrendsQuery {
+        within_last_hours,
+        max_count,
+        language,
+    })
+}
+
+/// `GET /trends/v0/{content,hashtags,links}`. 404 unless the registration enabled `trends`,
+/// 422 for a bad option, else `{"<kind>": [...]}` sorted by rank, at most `maxCount`.
+async fn trends<S: FaspState>(
+    state: &S,
+    registration: &Registration,
+    kind: &str,
+    query: &str,
+) -> Reply {
+    if let Err(reply) = require_enabled(state, registration, TRENDS_ID, TRENDS_VERSION) {
+        return reply;
+    }
+    let query = match parse_trends_query(query) {
+        Ok(query) => query,
+        Err(message) => return Reply::error(StatusCode::UNPROCESSABLE_ENTITY, message),
+    };
+    let max = query.max_count;
+    let id = registration.id;
+    let body = match kind {
+        "content" => state.trending_content(id, &query).await.map(|mut v| {
+            v.truncate(max);
+            serde_json::json!({ "content": v })
+        }),
+        "hashtags" => state.trending_hashtags(id, &query).await.map(|mut v| {
+            v.truncate(max);
+            serde_json::json!({ "hashtags": v })
+        }),
+        _ => state.trending_links(id, &query).await.map(|mut v| {
+            v.truncate(max);
+            serde_json::json!({ "links": v })
+        }),
+    };
+    match body {
+        Ok(body) => Reply::json(StatusCode::OK, &body),
+        Err(e) => {
+            tracing::error!(registration = id, host = registration.base_url, kind,
+                error = %e, "trends failed");
+            Reply::error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// `GET /follow_recommendation/v0/accounts`. 404 unless the registration enabled the
+/// capability, 422 without `accountUri`, else a JSON array of actor URIs. The account URI is
+/// never logged: it identifies the person asking.
+async fn follow_recommendation<S: FaspState>(
+    state: &S,
+    registration: &Registration,
+    query: &str,
+) -> Reply {
+    if let Err(reply) = require_enabled(
+        state,
+        registration,
+        FOLLOW_RECOMMENDATION_ID,
+        FOLLOW_RECOMMENDATION_VERSION,
+    ) {
+        return reply;
+    }
+    let (mut account, mut language) = (None, None);
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        let slot = match key.as_ref() {
+            "accountUri" => &mut account,
+            "language" => &mut language,
+            _ => continue,
+        };
+        slot.get_or_insert(value.into_owned());
+    }
+    let Some(account) = account
+        .map(|a| a.trim().to_owned())
+        .filter(|a| !a.is_empty())
+    else {
+        return Reply::error(StatusCode::UNPROCESSABLE_ENTITY, "accountUri is required");
+    };
+    let language = language
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty());
+    match state
+        .follow_recommendations(registration.id, &account, language.as_deref())
+        .await
+    {
+        Ok(uris) => Reply::json(StatusCode::OK, &uris),
+        Err(e) => {
+            tracing::error!(registration = registration.id, host = registration.base_url,
+                error = %e, "follow_recommendation failed");
+            Reply::error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
 }
 
 /// `GET /account_search/v0/search`. 404 unless the registration enabled the capability, 422

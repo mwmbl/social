@@ -20,7 +20,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use fasp::announcement::Announcement;
 use fasp::client::FaspClient;
-use fasp::http::{AccountSearchPage, FaspState, router};
+use fasp::http::{AccountSearchPage, FaspState, TrendingContent, TrendingTag, TrendsQuery, router};
 use fasp::registration::{RegistrationOutcome, register};
 use fasp::{Capability, PrivacyPolicy, ProviderInfoConfig, StoreAccess};
 use serde_json::{Value, json};
@@ -339,6 +339,14 @@ pub struct TestState {
     /// Every `account_search` call: (registration, term, limit, offset, language).
     pub search_calls: Mutex<Vec<SearchCall>>,
     pub search_fails: AtomicBool,
+    /// What the trends methods return (more than `maxCount`, to check the handler truncates).
+    pub trending_content: Mutex<Vec<TrendingContent>>,
+    pub trending_tags: Mutex<Vec<TrendingTag>>,
+    /// Every trends call: (registration, kind, query).
+    pub trend_calls: Mutex<Vec<(i64, &'static str, TrendsQuery)>>,
+    /// What `follow_recommendations` returns, and every call: (registration, account, language).
+    pub recommendations: Mutex<Vec<String>>,
+    pub recommendation_calls: Mutex<Vec<(i64, String, Option<String>)>>,
 }
 
 pub type SearchCall = (i64, String, usize, usize, Option<String>);
@@ -395,6 +403,41 @@ impl FaspState for TestState {
         let has_more = all.len() > offset + uris.len();
         Ok(AccountSearchPage { uris, has_more })
     }
+    async fn trending_content(
+        &self,
+        registration_id: i64,
+        query: &TrendsQuery,
+    ) -> Result<Vec<TrendingContent>, String> {
+        self.trend_calls
+            .lock()
+            .unwrap()
+            .push((registration_id, "content", query.clone()));
+        Ok(self.trending_content.lock().unwrap().clone())
+    }
+    async fn trending_hashtags(
+        &self,
+        registration_id: i64,
+        query: &TrendsQuery,
+    ) -> Result<Vec<TrendingTag>, String> {
+        self.trend_calls
+            .lock()
+            .unwrap()
+            .push((registration_id, "hashtags", query.clone()));
+        Ok(self.trending_tags.lock().unwrap().clone())
+    }
+    async fn follow_recommendations(
+        &self,
+        registration_id: i64,
+        account_uri: &str,
+        language: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        self.recommendation_calls.lock().unwrap().push((
+            registration_id,
+            account_uri.to_owned(),
+            language.map(str::to_owned),
+        ));
+        Ok(self.recommendations.lock().unwrap().clone())
+    }
 }
 
 pub struct Ours {
@@ -417,6 +460,11 @@ pub async fn start_ours(info: ProviderInfoConfig, extra: Vec<Capability>) -> Our
         search_results: Mutex::new(Vec::new()),
         search_calls: Mutex::new(Vec::new()),
         search_fails: AtomicBool::new(false),
+        trending_content: Mutex::new(Vec::new()),
+        trending_tags: Mutex::new(Vec::new()),
+        trend_calls: Mutex::new(Vec::new()),
+        recommendations: Mutex::new(Vec::new()),
+        recommendation_calls: Mutex::new(Vec::new()),
     });
     let app = router(state.clone());
     tokio::spawn(async move {
