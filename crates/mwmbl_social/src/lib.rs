@@ -29,6 +29,7 @@ pub mod http;
 pub mod inbox_app;
 pub mod keys;
 pub mod metrics;
+pub mod operator;
 pub mod outbox;
 pub mod pacing;
 pub mod records;

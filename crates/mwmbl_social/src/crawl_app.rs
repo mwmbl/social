@@ -6,8 +6,8 @@
 //! fetched from its origin by the worker, which first checks that the host runs Lemmy and that
 //! its robots.txt allows the URI ([`crate::crawl`]).
 //!
-//! - No `crawl_tokens` configured: 404. A missing or wrong bearer token: 401. Tokens are
-//!   compared by their SHA-256 digests, in constant time.
+//! - No `crawl_tokens` configured: 404. A missing or wrong bearer token: 401
+//!   ([`crate::operator`]).
 //! - A body over [`MAX_BODY_BYTES`]: 413. Not that shape, or too many URIs: 422.
 //! - Otherwise 202 with `{accepted, deferred, rejected}`. Duplicates count once. A URI that is
 //!   not an `https` URL (`http` too with `allow_http`), is longer than [`MAX_URI_LEN`], is on a
@@ -18,20 +18,20 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use axum::Router;
-use axum::body::{Body, to_bytes};
+use axum::body::to_bytes;
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::post;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use social_index::Tombstones;
 use store::{EnqueueOutcome, FetchKind, FetchReason, NewFetch, Store};
 use url::Url;
 
 use crate::config::Config;
 use crate::now_secs;
+use crate::operator::{TokenCheck, json_error as error, json_response as respond};
 use crate::writer::host_blocked;
 
 /// The route.
@@ -77,36 +77,8 @@ pub fn acceptable_uri(uri: &str, allow_http: bool) -> bool {
         && url.password().is_none()
 }
 
-fn digest(token: &[u8]) -> [u8; 32] {
-    Sha256::digest(token).into()
-}
-
-/// Whether `given` is one of `tokens` (digests), looking at every one in full.
-fn token_matches(tokens: &[[u8; 32]], given: &str) -> bool {
-    let given = digest(given.as_bytes());
-    // No early exit, neither within a digest nor across tokens.
-    let matched = tokens.iter().fold(0_u8, |matched, token| {
-        let diff = token
-            .iter()
-            .zip(given.iter())
-            .fold(0_u8, |acc, (a, b)| acc | (a ^ b));
-        matched | u8::from(diff == 0)
-    });
-    matched != 0
-}
-
-/// The bearer token of an `Authorization` header.
-fn bearer(headers: &HeaderMap) -> Option<&str> {
-    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, token) = value.trim().split_once(' ')?;
-    scheme
-        .eq_ignore_ascii_case("bearer")
-        .then(|| token.trim())
-        .filter(|t| !t.is_empty())
-}
-
 struct Inner {
-    tokens: Vec<[u8; 32]>,
+    tokens: TokenCheck,
     store: Mutex<Store>,
     tombstones: Arc<RwLock<Tombstones>>,
     queue_cap: usize,
@@ -127,31 +99,12 @@ impl std::fmt::Debug for CrawlApp {
     }
 }
 
-fn respond(status: StatusCode, body: &serde_json::Value) -> Response {
-    let mut response = Response::new(Body::from(body.to_string()));
-    *response.status_mut() = status;
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    response
-}
-
-fn error(status: StatusCode, message: &str) -> Response {
-    respond(status, &json!({ "error": message }))
-}
-
 impl CrawlApp {
     #[must_use]
     pub fn new(store: Store, tombstones: Arc<RwLock<Tombstones>>, config: &Config) -> Self {
         Self {
             inner: Arc::new(Inner {
-                tokens: config
-                    .crawl_tokens
-                    .0
-                    .iter()
-                    .map(|t| digest(t.as_bytes()))
-                    .collect(),
+                tokens: TokenCheck::new(&config.crawl_tokens.0),
                 store: Mutex::new(store),
                 tombstones,
                 queue_cap: config.queue_cap,
@@ -213,15 +166,8 @@ impl CrawlApp {
 }
 
 async fn submit_route(State(app): State<CrawlApp>, request: Request) -> Response {
-    if app.inner.tokens.is_empty() {
-        return error(StatusCode::NOT_FOUND, "not found");
-    }
-    if !bearer(request.headers()).is_some_and(|t| token_matches(&app.inner.tokens, t)) {
-        let mut response = error(StatusCode::UNAUTHORIZED, "a valid bearer token is required");
-        response
-            .headers_mut()
-            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-        return response;
+    if let Some(rejected) = app.inner.tokens.reject(request.headers()) {
+        return rejected;
     }
     let Ok(body) = to_bytes(request.into_body(), MAX_BODY_BYTES).await else {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "the body is too large");
@@ -282,27 +228,6 @@ mod tests {
         }
         let long = format!("https://l.example/{}", "a".repeat(MAX_URI_LEN));
         assert!(!acceptable_uri(&long, false));
-    }
-
-    #[test]
-    fn tokens_and_bearer_headers() {
-        let tokens = [digest(b"0123456789abcdef"), digest(b"fedcba9876543210")];
-        assert!(token_matches(&tokens, "0123456789abcdef"));
-        assert!(token_matches(&tokens, "fedcba9876543210"));
-        assert!(!token_matches(&tokens, "0123456789abcde"));
-        assert!(!token_matches(&tokens, ""));
-        assert!(!token_matches(&[], "0123456789abcdef"));
-        let headers = |value: &'static str| {
-            let mut h = HeaderMap::new();
-            h.insert(header::AUTHORIZATION, HeaderValue::from_static(value));
-            h
-        };
-        assert_eq!(bearer(&headers("Bearer abc")), Some("abc"));
-        assert_eq!(bearer(&headers("bearer  abc ")), Some("abc"));
-        assert_eq!(bearer(&headers("Basic abc")), None);
-        assert_eq!(bearer(&headers("Bearer ")), None);
-        assert_eq!(bearer(&headers("Bearer")), None);
-        assert_eq!(bearer(&HeaderMap::new()), None);
     }
 
     #[test]
