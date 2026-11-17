@@ -23,13 +23,13 @@ The project is called **Mwmbl Social**. The binary is `mwmbl-social`, and the bi
 - **No end-user search UI.** In FASP the fediverse server is the UI. Mastodon calls us and
   shows the results. We expose a JSON search API and a CLI for testing and debugging.
 - **The spec requires one small admin-facing flow: registration.** The FASP must show the admin
-  a key fingerprint. Mwmbl Social does this with the `register` CLI command and nothing more.
-  The spec defines the registration protocol but not who a FASP must accept; that is policy.
-  The server admin's approval step already proves their consent, so the only question is whom
-  an instance chooses to serve. Self-hosters run `register` themselves. **Our hosted instance's
-  gate lives in Mwmbl** (its existing domain submission flow), which triggers `register`. No
-  sign-up page or sign-up policy is built here.
-- **Mwmbl integration is postponed** until the index has real content.
+  a key fingerprint. Mwmbl Social has no web UI for it: self-hosters run the `register` CLI
+  command, and an operator's own sign-up UI calls the token-authenticated admin registration
+  API (see "Deployment and adoption"), which does the same thing. The spec defines the
+  registration protocol but not who a FASP must accept; that is policy, and it lives with the
+  operator. The server admin's approval step already proves their consent.
+- **Mwmbl integration happens in Mwmbl,** at query time over the search API (see "Deployment
+  and adoption"). Nothing about Mwmbl's search lives here.
 - **Lemmy** comes after FASP.
 
 ## Spec facts that shape the design
@@ -1022,8 +1022,64 @@ checked 2026-11-17):
   domain-blocked post and author still on their pages are not returned), and unit tests in
   `mwmbl_social::trends`.
 
-Mwmbl integration is a separate track. It can start any time after Stage 1, once there is real
-content: an authenticated search API for Mwmbl, and a decision on merging and ranking.
+Mwmbl integration is a separate track; see "Deployment and adoption".
+
+## Deployment and adoption
+
+Decided 2026-11-17. Two goals: get fediverse server owners to connect to a hosted instance
+(which raises awareness of Mwmbl and grows its userbase), and show opted-in social content in
+Mwmbl search.
+
+**What admins get today.** FASP has no post-search capability yet, so Mastodon calls us only
+for `account_search` and `follow_recommendation`, and only behind `EXPERIMENTAL_FEATURES=fasp`.
+The pitch is "make your opted-in users' posts findable on Mwmbl, and get fediverse-wide account
+search and follow suggestions", not "search for your server". Expect few FASP sign-ups early;
+Lemmy follows and crawl submissions from Mwmbl's crawler supply most of the first content.
+Consent is the lead message: the fediverse has rejected search projects before.
+
+**Domains.** Following the joinmastodon.org / mastodon.social split:
+
+- **mwmblsocial.org** is the project site: what it is, how consent works, how to self-host, and
+  a link to Mwmbl's hosted instance as one option. A static site on GitHub Pages, maintained
+  separately; [`docs/site-brief.md`](docs/site-brief.md) describes its content.
+- **social.mwmbl.org** is Mwmbl's hosted instance, i.e. its `base_url`. The base URL is in every
+  registration and in our actor's URI, so it never changes. Its actor is
+  `@mwmbl-social@social.mwmbl.org`.
+- **mwmbl.org** holds everything about Mwmbl's instance that has a UI: the sign-up page for
+  server admins, the instance's privacy policy, the social search page and the blended results.
+  The instance's `privacy_policy_url` and `sign_in_url` point there, and `root_redirect` sends
+  `social.mwmbl.org/` there. A self-hoster sets their own.
+
+**What this repo provides for it**, and nothing operator-specific:
+
+- `sign_in_url` config, sent as `signInUrl` in `provider_info`.
+- `root_redirect` config: `GET /` answers a redirect to it (404 when unset).
+- An admin API, `POST /api/v1/admin/registrations` (and list/revoke), doing what the
+  `register`/`registrations`/`unregister` CLI commands do, behind bearer tokens from
+  `admin_tokens` (like `crawl_tokens`; none turns it off). It returns the key fingerprint and
+  the approval link for the operator's UI to show.
+
+**Hosted sign-up (in Mwmbl).** A logged-in Mwmbl user enters their server's URL; Mwmbl
+rate-limits per user and per target host, then calls the admin API and shows the fingerprint and
+approval link, and later the registration's status. There is no moderation queue: the admin's
+approval on their own server proves consent. The rate limits exist because registering someone
+else's server leaves a pending provider in their admin panel, and Mastodon refuses a second
+registration for the same URL until that one is deleted.
+
+**Search integration (in Mwmbl), at query time.** Mwmbl calls our search API server-side:
+
+1. A social search page on mwmbl.org showing author, snippet, date and a link to the original.
+2. A "From the fediverse" block of the top few results on the main results page, under a hard
+   timeout and cached like Mwmbl's other external results.
+3. Later, social results fed into Mwmbl's ranker, once there is training data for them.
+
+Social documents are **never copied into Mwmbl's index**: a copy would escape our sweep and
+tombstones, and break the promise that withdrawn consent removes content promptly.
+
+**Deployment.** social.mwmbl.org runs on Dokku on Mwmbl's server, from the image this repo
+publishes (`ghcr.io/mwmbl/social`). The deployment config lives in the Mwmbl repo
+(`deploy/social/`), not here, since it is specific to Mwmbl's instance. Secrets are SOPS-encrypted
+there. Ansible is deferred until there is more than one server to manage.
 
 ## Working method
 
@@ -1118,8 +1174,9 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
    and opted in, and the sweep keeps rechecking it. An admin can still `forget` a domain.
 4. **Lemmy consent policy:** decided 2026-11-16. Index public Lemmy content where the
    instance's robots.txt allows it, choosing the consent rule by the author's host. See Stage 3.
-5. **Hosted sign-up:** decided 2026-11-16. Out of scope here. Mwmbl's domain submission flow
-   gates our hosted instance and triggers `register`.
+5. **Hosted sign-up:** decided 2026-11-17, replacing the 2026-11-16 decision to gate it through
+   Mwmbl's domain submission moderation. Self-serve on mwmbl.org for logged-in Mwmbl users,
+   rate-limited, calling the admin registration API. See "Deployment and adoption".
 6. **Index sizing defaults** for small self-hosters versus our instance, and whether to keep
    one posts index or shard it by time.
 7. **Trend input trust** (Stage 4): every `trending` event counts, pooled across
