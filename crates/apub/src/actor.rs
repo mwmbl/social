@@ -142,11 +142,11 @@ mod tests {
 
     #[test]
     fn actor_document() {
-        let a = server_actor("https://social.example/", "mwmbl-social", "PEM");
+        let a = server_actor("https://social.example/", "index", "PEM");
         assert_eq!(a["id"], "https://social.example/actor");
         // One of the user types Lemmy 0.19 accepts a Follow from: Person, Service, Organization.
         assert_eq!(a["type"], "Service");
-        assert_eq!(a["preferredUsername"], "mwmbl-social");
+        assert_eq!(a["preferredUsername"], "index");
         assert_eq!(a["inbox"], "https://social.example/actor/inbox");
         assert_eq!(a["outbox"], "https://social.example/actor/outbox");
         assert_eq!(a["publicKey"]["id"], server_actor_key_id(BASE));
@@ -170,23 +170,23 @@ mod tests {
 
     #[test]
     fn webfinger_resources() {
-        let found = webfinger("acct:mwmbl-social@social.example", BASE, "mwmbl-social").unwrap();
-        assert_eq!(found["subject"], "acct:mwmbl-social@social.example");
+        let found = webfinger("acct:index@social.example", BASE, "index").unwrap();
+        assert_eq!(found["subject"], "acct:index@social.example");
         assert_eq!(found["aliases"][0], "https://social.example/actor");
         assert_eq!(found["links"][0]["rel"], "self");
         assert_eq!(found["links"][0]["type"], "application/activity+json");
         assert_eq!(found["links"][0]["href"], "https://social.example/actor");
-        assert!(webfinger("ACCT:mwmbl-social@SOCIAL.example", BASE, "mwmbl-social").is_some());
-        assert!(webfinger("https://social.example/actor", BASE, "mwmbl-social").is_some());
+        assert!(webfinger("ACCT:index@SOCIAL.example", BASE, "index").is_some());
+        assert!(webfinger("https://social.example/actor", BASE, "index").is_some());
         for other in [
             "acct:other@social.example",
-            "acct:mwmbl-social@other.example",
+            "acct:index@other.example",
             "https://social.example/actor/inbox",
-            "mwmbl-social@social.example",
+            "index@social.example",
             "acct:",
             "",
         ] {
-            assert!(webfinger(other, BASE, "mwmbl-social").is_none(), "{other}");
+            assert!(webfinger(other, BASE, "index").is_none(), "{other}");
         }
         assert!(webfinger("acct:a@b", "not a url", "a").is_none());
         let with_port = webfinger("acct:u@localhost:8080", "http://localhost:8080", "u").unwrap();

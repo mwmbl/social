@@ -145,7 +145,7 @@ a post non-public, your server simply stops talking about it.
 
 Some fediverse software doesn't have the discoverable and indexable settings. If you're on one of
 those, you can opt in by following the instance's server actor (for Mwmbl's instance,
-`@mwmbl-social@social.mwmbl.org`). Following it means "index my public posts".
+`@index@social.mwmbl.org`). Following it means "index my public posts".
 
 - Following only fills in settings your account doesn't have. If you have turned discoverable or
   indexable **off**, that still wins.

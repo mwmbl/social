@@ -149,7 +149,7 @@ impl Default for Config {
             base_url: None,
             listen: "127.0.0.1:8080".to_string(),
             data_dir: PathBuf::from("./data"),
-            actor_username: "mwmbl-social".to_string(),
+            actor_username: "index".to_string(),
             name: "Mwmbl Social".to_string(),
             contact_email: None,
             privacy_policy_url: None,

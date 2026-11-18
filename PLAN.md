@@ -1081,7 +1081,7 @@ Consent is the lead message: the fediverse has rejected search projects before.
   separately; [`docs/site-brief.md`](docs/site-brief.md) describes its content.
 - **social.mwmbl.org** is Mwmbl's hosted instance, i.e. its `base_url`. The base URL is in every
   registration and in our actor's URI, so it never changes. Its actor is
-  `@mwmbl-social@social.mwmbl.org`.
+  `@index@social.mwmbl.org`.
 - **mwmbl.org** holds everything about Mwmbl's instance that has a UI: the sign-up page for
   server admins, the instance's privacy policy, the social search page and the blended results.
   The instance's `privacy_policy_url` and `sign_in_url` point there, and `root_redirect` sends
@@ -1186,8 +1186,9 @@ Write tests against the spec where appropriate. Aim for at least 80% test covera
 
 ## Open questions
 
-1. **Server actor `preferredUsername`:** `mwmbl-social` is the proposed default. Make it
-   configurable.
+1. **Server actor `preferredUsername`:** settled as `index` (configurable via
+   `actor_username`). `@index@social.mwmbl.org` says what following it does; the actor's id is
+   `/actor`, so the name only affects the WebFinger handle.
 2. **Mastodon status:** answered from Mastodon `main` (2026-11-15):
    - Behind `EXPERIMENTAL_FEATURES=fasp`. The server side implements registration,
      `data_sharing` (event subscriptions create/destroy, backfill requests and continuations)

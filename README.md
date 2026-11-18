@@ -91,7 +91,7 @@ set from the environment as `MWMBL_SOCIAL_<FIELD>`, for example `MWMBL_SOCIAL_BA
 | `contact_email`, `privacy_policy_url`, `fediverse_account` | unset | Shown in `provider_info` |
 | `sign_in_url` | unset | Where server admins sign in to manage their account with you; sent as `signInUrl` in `provider_info` |
 | `root_redirect` | unset | `GET /` answers a 302 to this URL; unset, `/` is a 404 |
-| `actor_username` | `mwmbl-social` | Our server actor's `preferredUsername` |
+| `actor_username` | `index` | Our server actor's `preferredUsername` |
 | `posts_pages`, `accounts_pages` | 65536, 16384 | Index size in 4 KiB pages; full pages drop their lowest-scored items |
 | `sweep_period_secs` | 6 days | One full revalidation pass over each index |
 | `fetch_concurrency` | 8 | |

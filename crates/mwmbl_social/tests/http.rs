@@ -16,7 +16,7 @@ async fn start_with(env: &TestEnv, root_redirect: Option<&str>) -> String {
     let (posts, accounts) = env.handle.readers();
     let app = router(AppState {
         base_url: "https://social.example".into(),
-        actor_username: "mwmbl-social".into(),
+        actor_username: "index".into(),
         name: "Test Search".into(),
         public_key_pem: test_key().verifying_key().to_spki_pem().unwrap(),
         posts,
@@ -73,7 +73,7 @@ async fn actor_webfinger_and_nodeinfo() {
             .contains("BEGIN PUBLIC KEY")
     );
 
-    let q = "resource=acct%3Amwmbl-social%40social.example";
+    let q = "resource=acct%3Aindex%40social.example";
     let (status, content_type, jrd) = get(&format!("{base}/.well-known/webfinger?{q}")).await;
     assert_eq!(status, 200);
     assert_eq!(content_type, "application/jrd+json");
