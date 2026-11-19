@@ -1,0 +1,58 @@
+# DRAFT (audit 2026-11-19, P3). Not active: copy to .github/workflows/build.yml after replacing
+# every <SHA ...> placeholder with the output of audit/ci-draft/resolve-pins.sh.
+# Changes from the current build.yml: actions pinned by full commit SHA, persist-credentials off,
+# and SBOM + provenance attestations on the pushed image.
+name: Build and Push to GHCR
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ] # Build for any PR targeting main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@<SHA for actions/checkout@v4> # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@<SHA for docker/setup-buildx-action@v3> # v3
+
+      # This helper action automatically generates tags like 'pr-12', 'beta', and 'sha-xxxx'
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@<SHA for docker/metadata-action@v5> # v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=long
+
+      - name: Log in to GHCR
+        uses: docker/login-action@<SHA for docker/login-action@v3> # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@<SHA for docker/build-push-action@v5> # v5
+        with:
+          context: .
+          # Don't push pull-request builds to GHCR
+          push: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
