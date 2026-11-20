@@ -311,4 +311,46 @@ mod tests {
         let no_keyid = [("signature-input", "sig1=(\"@method\");created=1")];
         assert_eq!(signer(&no_keyid), Err(SignatureError::MissingKeyId));
     }
+
+    #[test]
+    #[ignore = "AUDIT: A5 - fails until fixed"]
+    fn audit_a5_a_cavage_signature_for_another_host_verifies_here() {
+        use crate::signatures::integrity::legacy_digest;
+        use crate::signatures::keys::RsaSigningKey;
+        use crate::signatures::{cavage, http_date};
+        let key = RsaSigningKey::generate().unwrap();
+        let body = br#"{"type":"Delete"}"#;
+        let now = 1_700_000_000;
+        // Signed for delivery to another server's shared inbox.
+        let mut headers = vec![
+            ("host".to_owned(), "other.example".to_owned()),
+            ("date".to_owned(), http_date(now)),
+            ("digest".to_owned(), legacy_digest(body)),
+        ];
+        let signature = cavage::sign_request(
+            "POST",
+            "https://other.example/inbox",
+            &headers,
+            cavage::POST_HEADERS,
+            KEY,
+            &cavage::SignOptions::default(),
+            &key,
+        )
+        .unwrap();
+        headers.push(("signature".to_owned(), signature));
+        let by = signer(&headers).unwrap();
+        // Replayed to our shared inbox within the skew window.
+        let result = verify_post(
+            &by,
+            "https://social.example/inbox",
+            &headers,
+            body,
+            &key.verifying_key(),
+            now,
+        );
+        assert!(
+            result.is_err(),
+            "a signature made for other.example verified at social.example"
+        );
+    }
 }
