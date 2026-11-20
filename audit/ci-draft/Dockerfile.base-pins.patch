@@ -1,0 +1,22 @@
+# DRAFT (audit 2026-11-19, P3): pin both base images in /Dockerfile by digest. Replace each
+# <digest ...> with the output of audit/ci-draft/resolve-pins.sh, then apply with
+# `git apply audit/ci-draft/Dockerfile.base-pins.patch`. Dependabot (docker ecosystem) keeps
+# the digests current. Strip these comment lines before applying.
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,6 +1,6 @@
+ # Build: docker build -t mwmbl-social .
+ # Run:   docker run -v mwmbl-social:/data -e MWMBL_SOCIAL_BASE_URL=https://social.example mwmbl-social
+-FROM rust:1.100-bookworm AS build
++FROM rust:1.100-bookworm@sha256:<digest for rust:1.100-bookworm> AS build
+ WORKDIR /src
+ # Use the image's own 1.100.0 rather than letting rust-toolchain.toml pull clippy and rustfmt.
+ ENV RUSTUP_TOOLCHAIN=1.100.0
+@@ -8,6 +8,6 @@
+ RUN cargo build --release -p mwmbl_social
+
+-FROM debian:bookworm-slim
++FROM debian:bookworm-slim@sha256:<digest for debian:bookworm-slim>
+ # ca-certificates: outbound HTTPS (signed fetches, FASP calls) verifies against system roots.
+ RUN apt-get update \
+     && apt-get install -y --no-install-recommends ca-certificates \
