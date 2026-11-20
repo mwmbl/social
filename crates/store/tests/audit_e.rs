@@ -23,7 +23,11 @@ fn announces_cannot_grow_the_queue_past_its_cap() {
     let cap = 10;
     for n in 0..100 {
         store
-            .enqueue(&announce(&format!("https://s{n}.evil.example/actor")), 1, cap)
+            .enqueue(
+                &announce(&format!("https://s{n}.evil.example/actor")),
+                1,
+                cap,
+            )
             .unwrap();
     }
     let len = store.queue_len().unwrap();

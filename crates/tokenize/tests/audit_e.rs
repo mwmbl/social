@@ -11,7 +11,11 @@ fn query_keys_are_bounded() {
     let query: String = (0..10_000).map(|i| format!("w{i} ")).collect();
     assert!(query.len() < 64 * 1024, "fits in one URI");
     let keys = tokenize::query_keys(&query);
-    assert!(keys.len() <= 64, "one query asks for {} page reads", keys.len());
+    assert!(
+        keys.len() <= 64,
+        "one query asks for {} page reads",
+        keys.len()
+    );
 }
 
 /// E3: `special_keys` dedupes with `Vec::contains`, so it is quadratic in distinct hashtags

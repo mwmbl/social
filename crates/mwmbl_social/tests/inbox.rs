@@ -1019,7 +1019,7 @@ async fn audit_a3_anyone_on_an_origin_can_delete_anothers_post() {
     settle().await;
     assert_eq!(
         ours.search("espaliered").await,
-        [post.clone()],
+        std::slice::from_ref(&post),
         "Eve removed Bob's live post"
     );
 }

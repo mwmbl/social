@@ -21,5 +21,9 @@ fn account_keys_are_bounded() {
         languages: None,
     };
     let keys = account.keys(&KeyScheme::default());
-    assert!(keys.len() <= 64, "one account is stored under {} keys", keys.len());
+    assert!(
+        keys.len() <= 64,
+        "one account is stored under {} keys",
+        keys.len()
+    );
 }
