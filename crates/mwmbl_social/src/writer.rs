@@ -215,6 +215,9 @@ enum WriterCommand {
     Stats {
         reply: Reply<WriterStats>,
     },
+    /// Make the thread end while handles still exist, as a panic would. Tests only.
+    #[cfg(test)]
+    Halt,
 }
 
 /// Cloneable access to the writer, and to the read side of what it writes.
@@ -283,6 +286,19 @@ impl WriterHandle {
 
     pub async fn stats(&self) -> Result<WriterStats, WriterError> {
         self.call(|reply| WriterCommand::Stats { reply }).await
+    }
+
+    /// Resolves once the writer thread has ended, whether it returned or panicked: its end
+    /// drops the command receiver. While any handle exists the thread only ends that way by
+    /// accident, so `serve` treats this as fatal.
+    pub async fn stopped(&self) {
+        self.tx.closed().await;
+    }
+
+    /// Make the writer thread end now, while handles still exist.
+    #[cfg(test)]
+    pub(crate) async fn halt(&self) {
+        let _ = self.tx.send(WriterCommand::Halt).await;
     }
 
     /// Read handles on both indexes, for search.
@@ -356,6 +372,10 @@ impl Writer {
                 // Held until the thread ends.
                 let _lock = lock;
                 while let Some(command) = rx.blocking_recv() {
+                    #[cfg(test)]
+                    if matches!(command, WriterCommand::Halt) {
+                        break;
+                    }
                     core.handle(command);
                 }
                 tracing::debug!("index writer stopped");
@@ -444,6 +464,9 @@ impl Core {
             WriterCommand::Stats { reply } => {
                 let _ = reply.send(Ok(self.stats()));
             }
+            // The thread loop ends on this before handing it here.
+            #[cfg(test)]
+            WriterCommand::Halt => {}
         }
     }
 
