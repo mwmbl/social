@@ -52,21 +52,51 @@ impl Store {
         Ok(rows)
     }
 
-    /// Adds a tombstone. Re-adding the same `(uri, kind)` refreshes `created_at`.
+    /// Adds a tombstone at `now` (Unix seconds). Re-adding the same `(uri, kind)` refreshes
+    /// `created_at`.
     pub fn add_tombstone(
         &self,
         uri: &str,
         kind: TombstoneKind,
         now: i64,
     ) -> Result<(), StoreError> {
+        self.add_tombstone_ms(uri, kind, now.saturating_mul(1000))
+    }
+
+    /// Adds a tombstone at `now_ms` (Unix milliseconds), so it can be compared with when a
+    /// fetch started. Re-adding the same `(uri, kind)` refreshes the creation time.
+    pub fn add_tombstone_ms(
+        &self,
+        uri: &str,
+        kind: TombstoneKind,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
         self.conn
             .execute(
-                "INSERT INTO tombstones (uri, kind, created_at) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (uri, kind) DO UPDATE SET created_at = excluded.created_at",
-                params![uri, kind, now],
+                "INSERT INTO tombstones (uri, kind, created_at, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (uri, kind) DO UPDATE SET created_at = excluded.created_at,
+                     created_at_ms = excluded.created_at_ms",
+                params![uri, kind, now_ms.div_euclid(1000), now_ms],
             )
             .map_err(ctx(format!("add {kind} tombstone {uri}")))?;
         Ok(())
+    }
+
+    /// When the `(uri, kind)` tombstone was made, in Unix milliseconds, if there is one.
+    pub fn tombstone_created_ms(
+        &self,
+        uri: &str,
+        kind: TombstoneKind,
+    ) -> Result<Option<i64>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT created_at_ms FROM tombstones WHERE uri = ?1 AND kind = ?2",
+                params![uri, kind],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(ctx(format!("read {kind} tombstone {uri}")))
     }
 
     pub fn list_tombstones(&self) -> Result<Vec<Tombstone>, StoreError> {
@@ -149,6 +179,26 @@ mod tests {
                 },
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn creation_time_in_milliseconds() -> TestResult {
+        let s = Store::open_in_memory()?;
+        assert_eq!(s.tombstone_created_ms("a", TombstoneKind::Object)?, None);
+        s.add_tombstone_ms("a", TombstoneKind::Object, 12_345)?;
+        s.add_tombstone("a", TombstoneKind::Author, 7)?;
+        assert_eq!(
+            s.tombstone_created_ms("a", TombstoneKind::Object)?,
+            Some(12_345)
+        );
+        assert_eq!(
+            s.tombstone_created_ms("a", TombstoneKind::Author)?,
+            Some(7000)
+        );
+        // The seconds column the sweep clears by follows the milliseconds.
+        assert_eq!(s.clear_tombstones_before(12)?, 1);
+        assert_eq!(s.clear_tombstones_before(13)?, 1);
         Ok(())
     }
 

@@ -25,12 +25,13 @@ use url::Url;
 use crate::context::ContextSource;
 use crate::crawl::{RobotsSource, RobotsVerdict};
 use crate::decide::{
-    Action, Author, Carried, Fetched, author_of, decide_account, decide_post, looks_like_post,
+    Action, Author, Carried, Clock, Fetched, author_of, decide_account, decide_post,
+    looks_like_post,
 };
 use crate::pacing::{Pacer, Plan, Running, ToDefer, candidate_limit, plan};
 use crate::robots::Robots;
 use crate::writer::{WriterHandle, host_blocked};
-use crate::{now_millis, now_secs};
+use crate::{now_millis, now_secs, stamp_millis};
 
 /// The longest an item waits after a transient failure.
 const MAX_RETRY_SECS: i64 = 6 * 3600;
@@ -95,6 +96,8 @@ pub struct AuthorCache {
 #[derive(Debug)]
 struct CacheEntry {
     inserted: i64,
+    /// The [`crate::stamp_millis`] taken when the document's fetch started.
+    fetched_at: i64,
     value: Value,
 }
 
@@ -108,7 +111,8 @@ impl AuthorCache {
         }
     }
 
-    pub fn get(&mut self, uri: &str, now: i64) -> Option<Value> {
+    /// The cached document and when its fetch started ([`crate::stamp_millis`]).
+    pub fn get(&mut self, uri: &str, now: i64) -> Option<(Value, i64)> {
         let expired = self
             .entries
             .get(uri)
@@ -117,14 +121,16 @@ impl AuthorCache {
             self.entries.remove(uri);
             return None;
         }
-        self.entries.get(uri).map(|e| e.value.clone())
+        self.entries
+            .get(uri)
+            .map(|e| (e.value.clone(), e.fetched_at))
     }
 
     pub fn remove(&mut self, uri: &str) {
         self.entries.remove(uri);
     }
 
-    pub fn insert(&mut self, uri: &str, value: Value, now: i64) {
+    pub fn insert(&mut self, uri: &str, value: Value, now: i64, fetched_at: i64) {
         if !self.entries.contains_key(uri) && self.entries.len() >= self.capacity {
             let ttl = self.ttl_secs;
             self.entries
@@ -144,6 +150,7 @@ impl AuthorCache {
             uri.to_string(),
             CacheEntry {
                 inserted: now,
+                fetched_at,
                 value,
             },
         );
@@ -518,33 +525,34 @@ impl Worker {
 
     /// Replaces the cached copy of an actor document with a fresh fetch, or drops it when the
     /// fetch did not return the document.
-    fn refresh_author(&self, uri: &str, fetched: &Fetched, now: i64) {
+    fn refresh_author(&self, uri: &str, fetched: &Fetched, now: i64, fetched_at: i64) {
         let mut cache = self.authors.lock().unwrap_or_else(PoisonError::into_inner);
         match fetched {
-            Fetched::Found(json) => cache.insert(uri, json.clone(), now),
+            Fetched::Found(json) => cache.insert(uri, json.clone(), now, fetched_at),
             _ => cache.remove(uri),
         }
     }
 
-    /// The author's actor document, from the cache or a fetch.
-    async fn fetch_author(&self, author_uri: &str, hint: &mut Option<i64>) -> Fetched {
+    /// The author's actor document, from the cache or a fetch, and when its fetch started.
+    async fn fetch_author(&self, author_uri: &str, hint: &mut Option<i64>) -> (Fetched, i64) {
         let now = now_secs();
         let cached = self
             .authors
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(author_uri, now);
-        if let Some(json) = cached {
-            return Fetched::Found(json);
+        if let Some((json, fetched_at)) = cached {
+            return (Fetched::Found(json), fetched_at);
         }
+        let fetched_at = stamp_millis();
         let fetched = self.fetch(author_uri, hint).await;
         if let Fetched::Found(json) = &fetched {
             self.authors
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(author_uri, json.clone(), now);
+                .insert(author_uri, json.clone(), now, fetched_at);
         }
-        fetched
+        (fetched, fetched_at)
     }
 
     /// The consent context of the actor at `uri`, when its document was fetched. It is worked
@@ -623,6 +631,16 @@ impl Worker {
                 not_before_hint: None,
             });
         }
+        // A cached author document is now older than the author tombstone it led to, so the
+        // writer would refuse every decision made from it. The next post fetches it afresh.
+        for action in &to_apply {
+            if let Action::AddAuthorTombstone { actor_uri } = action {
+                self.authors
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(actor_uri);
+            }
+        }
         Processed {
             uri: uri.to_string(),
             actions: to_apply,
@@ -645,6 +663,10 @@ impl Worker {
             Some(Carried::Account(a)) => (None, Some(a)),
             None => (None, None),
         };
+        let clock = Clock {
+            now,
+            fetched_at: stamp_millis(),
+        };
         let fetched = match robots {
             Some(robots) => match self.fetch_crawled(uri, robots, hint).await {
                 Some(fetched) => fetched,
@@ -665,13 +687,13 @@ impl Worker {
         };
         match as_post {
             Some(true) => {
-                self.decide_post_path(item, carried_post, &fetched, robots, now, hint)
+                self.decide_post_path(item, carried_post, &fetched, robots, clock, hint)
                     .await
             }
             Some(false) => {
                 // A freshly fetched actor document is newer than any cached copy: an opt-out
                 // announced for this account must reach posts processed after it.
-                self.refresh_author(uri, &fetched, now);
+                self.refresh_author(uri, &fetched, now, clock.fetched_at);
                 let context = self.context_of(uri, &fetched, now).await;
                 decide_account(
                     uri,
@@ -680,13 +702,14 @@ impl Worker {
                     carried_account,
                     &fetched,
                     context,
-                    now,
+                    clock,
                 )
             }
             None => {
                 // We don't know whether it was a post or an actor, and it is not there to say:
                 // remove it as both.
-                let post = decide_post(uri, item.reason, item.attempts, None, &fetched, None, now);
+                let post =
+                    decide_post(uri, item.reason, item.attempts, None, &fetched, None, clock);
                 let account = decide_account(
                     uri,
                     item.reason,
@@ -694,7 +717,7 @@ impl Worker {
                     None,
                     &fetched,
                     ConsentContext::NONE,
-                    now,
+                    clock,
                 );
                 if post
                     .iter()
@@ -717,10 +740,11 @@ impl Worker {
         carried: Option<SocialPost>,
         fetched: &Fetched,
         robots: Option<&Robots>,
-        now: i64,
+        mut clock: Clock,
         hint: &mut Option<i64>,
     ) -> Vec<Action> {
         let uri = item.uri.as_str();
+        let now = clock.now;
         let author = match fetched {
             Fetched::Found(json) => match author_of(json) {
                 // A crawl submission's author is on the same host, under the same robots.txt.
@@ -741,7 +765,9 @@ impl Worker {
                 // else is never fetched: that is also what stops an object from pointing us at
                 // arbitrary URLs.
                 Some(author_uri) if same_origin(&author_uri, uri) => {
-                    let author = self.fetch_author(&author_uri, hint).await;
+                    let (author, author_fetched_at) = self.fetch_author(&author_uri, hint).await;
+                    // A cached author document can be older than the post's fetch (audit D6).
+                    clock.fetched_at = clock.fetched_at.min(author_fetched_at);
                     let context = self.context_of(&author_uri, &author, now).await;
                     Some((author, context))
                 }
@@ -759,7 +785,7 @@ impl Worker {
                 fetched,
                 context: *context,
             }),
-            now,
+            clock,
         )
     }
 
@@ -1170,27 +1196,28 @@ mod tests {
     fn author_cache_expires_and_evicts_the_oldest() {
         let mut cache = AuthorCache::new(2, 100);
         assert!(cache.is_empty());
-        cache.insert("a", json!(1), 0);
-        cache.insert("b", json!(2), 10);
-        assert_eq!(cache.get("a", 50), Some(json!(1)));
+        cache.insert("a", json!(1), 0, 0);
+        cache.insert("b", json!(2), 10, 10);
+        assert_eq!(cache.get("a", 50).map(|(v, _)| v), Some(json!(1)));
         // Full: the oldest ("a") goes.
-        cache.insert("c", json!(3), 20);
+        cache.insert("c", json!(3), 20, 20);
         assert_eq!(cache.len(), 2);
-        assert_eq!(cache.get("a", 20), None);
-        assert_eq!(cache.get("b", 20), Some(json!(2)));
+        assert_eq!(cache.get("a", 20).map(|(v, _)| v), None);
+        assert_eq!(cache.get("b", 20).map(|(v, _)| v), Some(json!(2)));
         // Expiry: "b" was inserted at 10 with a 100 s ttl.
-        assert_eq!(cache.get("b", 110), None);
-        assert_eq!(cache.get("c", 110), Some(json!(3)));
+        assert_eq!(cache.get("b", 110).map(|(v, _)| v), None);
+        assert_eq!(cache.get("c", 110).map(|(v, _)| v), Some(json!(3)));
         // Making room prefers dropping the expired entries.
-        cache.insert("d", json!(4), 125);
-        cache.insert("e", json!(5), 126);
-        assert_eq!(cache.get("d", 126), Some(json!(4)));
-        assert_eq!(cache.get("e", 126), Some(json!(5)));
-        assert_eq!(cache.get("c", 126), None);
+        cache.insert("d", json!(4), 125, 125);
+        cache.insert("e", json!(5), 126, 126);
+        assert_eq!(cache.get("d", 126).map(|(v, _)| v), Some(json!(4)));
+        assert_eq!(cache.get("e", 126).map(|(v, _)| v), Some(json!(5)));
+        assert_eq!(cache.get("c", 126).map(|(v, _)| v), None);
         // Re-inserting an existing key does not evict.
-        cache.insert("d", json!(6), 127);
-        assert_eq!(cache.get("e", 127), Some(json!(5)));
-        assert_eq!(cache.get("d", 127), Some(json!(6)));
+        cache.insert("d", json!(6), 127, 9000);
+        assert_eq!(cache.get("e", 127).map(|(v, _)| v), Some(json!(5)));
+        // The fetch time comes back with the document, for the writer's tombstone check.
+        assert_eq!(cache.get("d", 127), Some((json!(6), 9000)));
     }
 
     #[test]

@@ -52,10 +52,12 @@ async fn tombstones_are_applied_then_retired_after_a_full_pass_of_both_indexes()
             Action::IndexPost {
                 record: post("http://h.example/s/1", "hello world"),
                 replaces: None,
+                fetched_at: mwmbl_social::stamp_millis(),
             },
             Action::IndexPost {
                 record: post("http://h.example/s/2", "hello again"),
                 replaces: None,
+                fetched_at: mwmbl_social::stamp_millis(),
             },
         ])
         .await
@@ -158,6 +160,7 @@ async fn stale_records_are_queued_for_revalidation_with_their_record_once() {
         .apply(vec![Action::IndexPost {
             record: old,
             replaces: None,
+            fetched_at: mwmbl_social::stamp_millis(),
         }])
         .await
         .unwrap();

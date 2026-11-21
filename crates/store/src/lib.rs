@@ -327,6 +327,30 @@ mod tests {
     }
 
     #[test]
+    fn tombstone_milliseconds_migration_keeps_creation_times() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("s.db");
+        {
+            // A database from before tombstone milliseconds (migration 9).
+            let conn = Connection::open(&path)?;
+            for sql in schema::MIGRATIONS.iter().take(8) {
+                conn.execute_batch(sql)?;
+            }
+            conn.execute_batch("PRAGMA user_version = 8")?;
+            conn.execute(
+                "INSERT INTO tombstones (uri, kind, created_at) VALUES ('https://a/1', 'object', 5)",
+                [],
+            )?;
+        }
+        let store = Store::open(&path)?;
+        assert_eq!(
+            store.tombstone_created_ms("https://a/1", TombstoneKind::Object)?,
+            Some(5000)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn in_memory_is_current() -> TestResult {
         let store = Store::open_in_memory()?;
         assert_eq!(store.schema_version()?, SCHEMA_VERSION);

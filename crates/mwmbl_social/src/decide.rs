@@ -15,6 +15,8 @@
 //! - Transient failures (backoff, rate limits, network errors) retry, and so does a refused
 //!   signed fetch until it has failed `REFUSED_ATTEMPTS` times: then we can't confirm consent,
 //!   and we remove.
+//! - Every index or clear action carries when its fetch started ([`Clock::fetched_at`]), so the
+//!   writer can refuse it if a tombstone was made after that (audit D2, D6).
 
 use apub::consent::{
     ConsentContext, Refusal, evaluate_account_in, evaluate_post_in, posts_consented,
@@ -38,12 +40,34 @@ pub enum Fetched {
     Transient(String),
 }
 
-/// A change to make, in order.
+/// The times a decision is made with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Clock {
+    /// Unix seconds, for the records' `checked` time.
+    pub now: i64,
+    /// A [`crate::stamp_millis`] taken before the oldest fetch the decision rests on. The
+    /// writer refuses an index or clear action when the tombstone it would override is newer.
+    pub fetched_at: i64,
+}
+
+impl Clock {
+    /// A clock whose fetch started at the beginning of second `now`.
+    #[must_use]
+    pub fn at(now: i64) -> Self {
+        Self {
+            now,
+            fetched_at: now.saturating_mul(1000),
+        }
+    }
+}
+
+/// A change to make, in order. `fetched_at` is the decision's [`Clock::fetched_at`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     IndexPost {
         record: SocialPost,
         replaces: Option<SocialPost>,
+        fetched_at: i64,
     },
     RemovePost {
         uri: String,
@@ -53,6 +77,7 @@ pub enum Action {
     IndexAccount {
         record: SocialAccount,
         replaces: Option<SocialAccount>,
+        fetched_at: i64,
     },
     RemoveAccount {
         uri: String,
@@ -64,6 +89,7 @@ pub enum Action {
     },
     ClearAuthorTombstone {
         actor_uri: String,
+        fetched_at: i64,
     },
     Retry {
         reason: String,
@@ -140,7 +166,7 @@ fn account_actions(
     context: ConsentContext,
     carried: Option<SocialAccount>,
     reason: FetchReason,
-    now: i64,
+    clock: Clock,
 ) -> Vec<Action> {
     let parsed = parse_actor(actor_json);
     let Some(uri) = actor_json
@@ -154,9 +180,12 @@ fn account_actions(
     };
     match (evaluate_account_in(actor_json, context), parsed) {
         (Ok(()), Ok(actor)) => {
-            let record = account_record(&actor, carried.as_ref(), now);
+            let record = account_record(&actor, carried.as_ref(), clock.now);
             let tombstone_change = if posts_consented(actor_json, context) {
-                Action::ClearAuthorTombstone { actor_uri: uri }
+                Action::ClearAuthorTombstone {
+                    actor_uri: uri,
+                    fetched_at: clock.fetched_at,
+                }
             } else {
                 Action::AddAuthorTombstone { actor_uri: uri }
             };
@@ -164,6 +193,7 @@ fn account_actions(
                 Action::IndexAccount {
                     record,
                     replaces: carried,
+                    fetched_at: clock.fetched_at,
                 },
                 tombstone_change,
             ]
@@ -180,7 +210,8 @@ pub struct Author<'a> {
 }
 
 /// Decide what a fetched post means. `author` is the fetch of the post's `attributedTo`,
-/// which the caller makes only when the post itself was found.
+/// which the caller makes only when the post itself was found. `clock.fetched_at` is the older
+/// of the two documents' fetch times, since the decision rests on both.
 #[must_use]
 pub fn decide_post(
     uri: &str,
@@ -189,7 +220,7 @@ pub fn decide_post(
     carried: Option<SocialPost>,
     object: &Fetched,
     author: Option<Author<'_>>,
-    now: i64,
+    clock: Clock,
 ) -> Vec<Action> {
     let json = match object {
         Fetched::Found(json) => json,
@@ -215,8 +246,9 @@ pub fn decide_post(
     ) {
         (Ok(()), Ok(post)) => {
             let mut actions = vec![Action::IndexPost {
-                record: post_record(&post, now),
+                record: post_record(&post, clock.now),
                 replaces: carried,
+                fetched_at: clock.fetched_at,
             }];
             // The author we fetched anyway is worth indexing too, if they're discoverable.
             if evaluate_account_in(author_json, author_context).is_ok() {
@@ -225,7 +257,7 @@ pub fn decide_post(
                     author_context,
                     None,
                     FetchReason::Backfill,
-                    now,
+                    clock,
                 ));
             }
             actions
@@ -237,7 +269,7 @@ pub fn decide_post(
                 author_context,
                 None,
                 FetchReason::Backfill,
-                now,
+                clock,
             ));
             actions
         }
@@ -255,11 +287,11 @@ pub fn decide_account(
     carried: Option<SocialAccount>,
     actor: &Fetched,
     context: ConsentContext,
-    now: i64,
+    clock: Clock,
 ) -> Vec<Action> {
     match actor {
         Fetched::Found(json) if json.get("id").and_then(Value::as_str) == Some(uri) => {
-            account_actions(json, context, carried, reason, now)
+            account_actions(json, context, carried, reason, clock)
         }
         Fetched::Refused if attempts + 1 < REFUSED_ATTEMPTS => {
             vec![Action::Retry {
@@ -643,7 +675,7 @@ mod tests {
                     fetched,
                     context: c.context,
                 }),
-                NOW,
+                Clock::at(NOW),
             );
             let got: Vec<_> = got.iter().map(kind).collect();
             if got != c.expected {
@@ -675,7 +707,7 @@ mod tests {
                         c.carried.clone(),
                         &c.object,
                         c.author.as_ref().map(|fetched| Author { fetched, context }),
-                        NOW,
+                        Clock::at(NOW),
                     );
                     got.iter().map(kind).collect::<Vec<_>>()
                 };
@@ -699,11 +731,20 @@ mod tests {
                 fetched: &author(true, true),
                 context: ConsentContext::NONE,
             }),
-            NOW,
+            Clock {
+                now: NOW,
+                fetched_at: 42,
+            },
         );
-        let Some(Action::IndexPost { record, replaces }) = got.first() else {
+        let Some(Action::IndexPost {
+            record,
+            replaces,
+            fetched_at,
+        }) = got.first()
+        else {
             panic!("{got:?}")
         };
+        assert_eq!(*fetched_at, 42, "the writer needs the fetch time");
         assert_eq!(record.extract, "hello garden");
         assert_eq!(record.checked, NOW);
         assert_eq!(
@@ -852,7 +893,15 @@ mod tests {
     fn check_accounts(cases: Vec<AccountCase>) {
         let mut failures = Vec::new();
         for (name, reason, attempts, carried, actor, context, expected) in cases {
-            let got = decide_account(AUTHOR, reason, attempts, carried, &actor, context, NOW);
+            let got = decide_account(
+                AUTHOR,
+                reason,
+                attempts,
+                carried,
+                &actor,
+                context,
+                Clock::at(NOW),
+            );
             let got: Vec<_> = got.iter().map(kind).collect();
             if got != expected {
                 failures.push(format!("{name}: expected {expected:?}, got {got:?}"));

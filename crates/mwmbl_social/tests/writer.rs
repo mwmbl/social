@@ -47,6 +47,7 @@ async fn index_then_replace_then_upsert() {
         .apply(vec![Action::IndexPost {
             record: old.clone(),
             replaces: None,
+            fetched_at: mwmbl_social::stamp_millis(),
         }])
         .await
         .unwrap();
@@ -57,6 +58,7 @@ async fn index_then_replace_then_upsert() {
         .apply(vec![Action::IndexPost {
             record: new.clone(),
             replaces: Some(old),
+            fetched_at: mwmbl_social::stamp_millis(),
         }])
         .await
         .unwrap();
@@ -67,6 +69,7 @@ async fn index_then_replace_then_upsert() {
         .apply(vec![Action::IndexPost {
             record: post("http://h.example/s/1", "epsilon"),
             replaces: None,
+            fetched_at: mwmbl_social::stamp_millis(),
         }])
         .await
         .unwrap();
@@ -82,6 +85,7 @@ async fn remove_post_tombstone_rules() {
     let index = |text: &str, n: u32| Action::IndexPost {
         record: post(&format!("http://h.example/s/{n}"), text),
         replaces: None,
+        fetched_at: mwmbl_social::stamp_millis(),
     };
     env.handle
         .apply(vec![
@@ -157,6 +161,7 @@ async fn accounts_keep_observed_languages_and_removal_works() {
         .apply(vec![Action::IndexAccount {
             record: account(uri, Some(vec!["en".into()])),
             replaces: None,
+            fetched_at: mwmbl_social::stamp_millis(),
         }])
         .await
         .unwrap();
@@ -165,6 +170,7 @@ async fn accounts_keep_observed_languages_and_removal_works() {
         .apply(vec![Action::IndexAccount {
             record: account(uri, None),
             replaces: None,
+            fetched_at: mwmbl_social::stamp_millis(),
         }])
         .await
         .unwrap();
@@ -203,6 +209,7 @@ async fn author_tombstones_hide_posts_and_clear() {
         .apply(vec![Action::IndexPost {
             record: post("http://h.example/s/1", "hello"),
             replaces: None,
+            fetched_at: mwmbl_social::stamp_millis(),
         }])
         .await
         .unwrap();
@@ -222,6 +229,7 @@ async fn author_tombstones_hide_posts_and_clear() {
     env.handle
         .apply(vec![Action::ClearAuthorTombstone {
             actor_uri: "http://h.example/users/a".into(),
+            fetched_at: mwmbl_social::stamp_millis(),
         }])
         .await
         .unwrap();
@@ -238,10 +246,12 @@ async fn forget_a_uri_removes_it_from_both_indexes_and_tombstones_both_ways() {
             Action::IndexAccount {
                 record: account(uri, None),
                 replaces: None,
+                fetched_at: mwmbl_social::stamp_millis(),
             },
             Action::IndexPost {
                 record: post(uri, "odd object with the actor's uri"),
                 replaces: None,
+                fetched_at: mwmbl_social::stamp_millis(),
             },
         ])
         .await
@@ -270,6 +280,7 @@ async fn rows_written_by_another_process_are_picked_up_on_reload() {
         .apply(vec![Action::IndexPost {
             record: post("http://h.example/s/1", "hello"),
             replaces: None,
+            fetched_at: mwmbl_social::stamp_millis(),
         }])
         .await
         .unwrap();
@@ -360,6 +371,7 @@ async fn reindexing_after_a_fresh_consented_fetch_clears_the_object_tombstone() 
         .apply(vec![Action::IndexPost {
             record: p.clone(),
             replaces: None,
+            fetched_at: mwmbl_social::stamp_millis(),
         }])
         .await
         .unwrap();
@@ -382,6 +394,7 @@ async fn a_forgotten_uri_is_never_indexed_again_even_after_tombstones_clear() {
         .apply(vec![Action::IndexPost {
             record: p.clone(),
             replaces: None,
+            fetched_at: mwmbl_social::stamp_millis(),
         }])
         .await
         .unwrap();
@@ -397,9 +410,11 @@ async fn a_forgotten_uri_is_never_indexed_again_even_after_tombstones_clear() {
             Action::IndexPost {
                 record: post("http://h.example/s/11", "parsnip"),
                 replaces: None,
+                fetched_at: mwmbl_social::stamp_millis(),
             },
             Action::ClearAuthorTombstone {
                 actor_uri: "http://h.example/users/a".into(),
+                fetched_at: mwmbl_social::stamp_millis(),
             },
         ])
         .await

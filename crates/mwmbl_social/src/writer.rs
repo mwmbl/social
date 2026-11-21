@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::config::Config;
 use crate::decide::Action;
-use crate::now_secs;
+use crate::{now_secs, stamp_millis};
 
 /// Commands queued to the writer before senders wait.
 const CHANNEL_CAPACITY: usize = 256;
@@ -401,7 +401,7 @@ fn describe(action: &Action) -> String {
         Action::IndexAccount { record, .. } => format!("index account {}", record.uri),
         Action::RemoveAccount { uri, .. } => format!("remove account {uri}"),
         Action::AddAuthorTombstone { actor_uri } => format!("tombstone author {actor_uri}"),
-        Action::ClearAuthorTombstone { actor_uri } => {
+        Action::ClearAuthorTombstone { actor_uri, .. } => {
             format!("clear tombstone of author {actor_uri}")
         }
         Action::Retry { .. } => "retry".to_string(),
@@ -497,9 +497,28 @@ impl Core {
         Ok(())
     }
 
+    /// Whether a `kind` tombstone for `uri` was made after `fetched_at`: then the fetch an
+    /// index or clear decision came from is older than the delete or opt-out, and loses.
+    fn tombstoned_since(
+        &self,
+        uri: &str,
+        kind: TombstoneKind,
+        fetched_at: i64,
+    ) -> Result<bool, WriterError> {
+        let created = self
+            .store
+            .tombstone_created_ms(uri, kind)
+            .map_err(store_err(format!("read {kind} tombstone {uri}")))?;
+        let newer = created.is_some_and(|created| created > fetched_at);
+        if newer {
+            tracing::info!(uri, %kind, "a tombstone is newer than the fetch: keeping it");
+        }
+        Ok(newer)
+    }
+
     fn tombstone_object(&self, uri: &str) -> Result<(), WriterError> {
         self.store
-            .add_tombstone(uri, TombstoneKind::Object, now_secs())
+            .add_tombstone_ms(uri, TombstoneKind::Object, stamp_millis())
             .map_err(store_err(format!("tombstone object {uri}")))?;
         self.tombstones_mut().add_object(uri);
         Ok(())
@@ -507,7 +526,7 @@ impl Core {
 
     fn tombstone_author(&self, uri: &str) -> Result<(), WriterError> {
         self.store
-            .add_tombstone(uri, TombstoneKind::Author, now_secs())
+            .add_tombstone_ms(uri, TombstoneKind::Author, stamp_millis())
             .map_err(store_err(format!("tombstone author {uri}")))?;
         self.tombstones_mut().add_author(uri);
         Ok(())
@@ -527,12 +546,26 @@ impl Core {
     #[allow(clippy::too_many_lines)] // One arm per action; splitting hides the consent rules.
     fn apply_one(&mut self, action: Action) -> Result<(), WriterError> {
         match action {
-            Action::IndexPost { record, replaces } => {
+            Action::IndexPost {
+                record,
+                replaces,
+                fetched_at,
+            } => {
                 let operation = format!("index post {}", record.uri);
                 if self.forgotten.contains(&record.uri)
                     || self.forgotten.contains(&record.author_uri)
                 {
                     tracing::info!(uri = %record.uri, "not indexing a forgotten post or author");
+                    return Ok(());
+                }
+                // A delete or opt-out applied while this decision's fetch was in flight wins.
+                if self.tombstoned_since(&record.uri, TombstoneKind::Object, fetched_at)?
+                    || self.tombstoned_since(
+                        &record.author_uri,
+                        TombstoneKind::Author,
+                        fetched_at,
+                    )?
+                {
                     return Ok(());
                 }
                 // A fresh fetch just passed consent, so an object tombstone from an earlier
@@ -575,10 +608,14 @@ impl Core {
             Action::IndexAccount {
                 mut record,
                 replaces,
+                fetched_at,
             } => {
                 let operation = format!("index account {}", record.uri);
                 if self.forgotten.contains(&record.uri) {
                     tracing::info!(uri = %record.uri, "not indexing a forgotten account");
+                    return Ok(());
+                }
+                if self.tombstoned_since(&record.uri, TombstoneKind::Object, fetched_at)? {
                     return Ok(());
                 }
                 self.clear_object_tombstone(&record.uri)?;
@@ -624,8 +661,13 @@ impl Core {
                 Ok(())
             }
             Action::AddAuthorTombstone { actor_uri } => self.tombstone_author(&actor_uri),
-            Action::ClearAuthorTombstone { actor_uri } => {
-                if self.forgotten.contains(&actor_uri) {
+            Action::ClearAuthorTombstone {
+                actor_uri,
+                fetched_at,
+            } => {
+                if self.forgotten.contains(&actor_uri)
+                    || self.tombstoned_since(&actor_uri, TombstoneKind::Author, fetched_at)?
+                {
                     return Ok(());
                 }
                 self.store

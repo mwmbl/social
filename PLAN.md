@@ -269,7 +269,8 @@ explicit user and admin actions.
   cached robots.txt verdict with its fetch time (Stage 3).
 - **`domain_blocks`**: admin-configured blocked domains. We neither fetch from these hosts nor
   return results from them.
-- **`tombstones`**: object or actor URI, kind (object/author), created_at.
+- **`tombstones`**: object or actor URI, kind (object/author), created_at (seconds, for the
+  sweep's clearing) and created_at_ms (a fetch stamp, for the writer's ordering check below).
   - Holds deletes and opt-outs that couldn't be applied to the index immediately (see Deletion):
     - FASP delete events whose `uri:` lookup missed
     - author opt-outs
@@ -462,6 +463,17 @@ any page, including on crowded indexes where `uri:` lookups miss.
 tombstoned) and then public again, the fresh consented fetch clears its object tombstone.
 Otherwise the sweep would delete the post that now has consent. Forgotten URIs and authors are
 never re-indexed.
+
+**A decision never overrides a newer tombstone.** `IndexPost`, `IndexAccount` and
+`ClearAuthorTombstone` carry `fetched_at`, a stamp taken before the oldest fetch the decision
+rests on (for a post, the older of the post's fetch and its author document's, which may come
+from the author cache). Tombstones record a stamp from the same clock (`stamp_millis`, strictly
+increasing within the process). The writer drops `IndexPost` when the post's object tombstone
+or its author's tombstone is newer, drops `IndexAccount` when the account's object tombstone is
+newer, and keeps an author tombstone newer than a `ClearAuthorTombstone`. So an inbox `Delete`,
+`Block` or unfollow applied while a fetch is in flight wins, and the sweep's revalidation picks
+up a later opt-in (audit D2, D6). An `AddAuthorTombstone` the worker applies also drops that
+author from the author cache, since every decision made from the cached copy would be refused.
 
 **Updates** delete the old record (found by URI lookup) and then add the new one, because the
 terms may have changed. Updates and lifecycle events rewrite `checked`, which covers the

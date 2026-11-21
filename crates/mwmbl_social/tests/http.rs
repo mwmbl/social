@@ -105,6 +105,7 @@ async fn search_posts_and_accounts() {
         .map(|n| Action::IndexPost {
             record: post(n),
             replaces: None,
+            fetched_at: mwmbl_social::stamp_millis(),
         })
         .collect();
     actions.push(Action::IndexAccount {
@@ -119,6 +120,7 @@ async fn search_posts_and_accounts() {
             languages: Some(vec!["en-GB".into()]),
         },
         replaces: None,
+        fetched_at: mwmbl_social::stamp_millis(),
     });
     env.handle.apply(actions).await.unwrap();
     let base = start(&env).await;
