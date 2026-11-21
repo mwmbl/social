@@ -233,8 +233,12 @@ policy (`is_public`, table-tested):
 - `allow_private_addresses` (default `false`) turns all of it off, for tests (the in-process
   fakes listen on 127.0.0.1) and the Docker dev setups (private networks). Like `allow_http`,
   it is never for production.
-- An HTTP proxy from the environment (`HTTPS_PROXY`) resolves names itself, so the filter then
-  sees only the proxy's address; enforce the policy at such a proxy.
+- `client_builder` ignores proxies from the environment (`HTTPS_PROXY` and friends), with or
+  without `allow_private_addresses`. A proxy resolves names itself, so through one the filter
+  would see only the proxy's address. Outbound traffic always connects directly; if a proxy is
+  ever needed it must be explicit config, and the proxy must do its own filtering.
+- `serve` logs a warning at start-up for each of `allow_private_addresses` and `allow_http`
+  that is on, so a production deployment copied from a dev compose file says so in its logs.
 
 ### Data model (SQLite)
 
