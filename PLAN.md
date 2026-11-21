@@ -752,8 +752,10 @@ from the origin ourselves means nothing new is trusted.
      explicit `discoverable: false` or `indexable: false` still wins. Mastodon users already
      have the flags, so a follow changes nothing for them. The consent function stays pure,
      taking "follows us" as an input.
-   - Unfollow (`Undo` `Follow`): delete the row, add an author tombstone, and unfollow back.
-     Revalidation rechecks the follow like any other consent input.
+   - Unfollow (`Undo` `Follow`): delete the row, add an author tombstone, remove the account
+     (no object tombstone), and unfollow back. A refetch then indexes the account again if its
+     own flags consent; if the refetch fails, the account stays out. Revalidation rechecks the
+     follow like any other consent input.
    - This works for any software without FEP-5feb, not only GoToSocial. Getting FASP into
      GoToSocial is still the better long-term route; raise it with its developers once the
      Mastodon integration can serve as a reference.
@@ -809,8 +811,10 @@ follow opt-in, admin follows, outbox backfill and crawl submissions with robots.
 - Effects: `Follow` of us records the opt-in, delivers an `Accept` (object: the `Follow`,
   rebuilt from its id, actor and object), follows back (a `following` row, pending until the
   `Accept`) and queues the actor. `Undo{Follow}` of us (embedded, or by id from an opted-in
-  actor) drops the opt-in, adds an author tombstone, delivers `Undo{Follow}` for our follow and
-  drops the row, then queues the actor again so one whose own flags consent is shown again.
+  actor) drops the opt-in, adds an author tombstone, removes the account without an object
+  tombstone (so a failed refetch can't leave it served on the withdrawn opt-in), delivers
+  `Undo{Follow}` for our follow and drops the row, then queues the actor again so one whose own
+  flags consent is shown again.
   `Accept`/`Reject` of our `Follow` (by id, or embedded from us to them) marks it accepted or
   drops it. `Create`/`Update` from a followed actor queue the object if it is on the actor's
   origin or the actor is a followed `Group`. `Announce` from a followed actor unwraps one

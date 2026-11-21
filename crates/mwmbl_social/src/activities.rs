@@ -7,8 +7,10 @@
 //!
 //! Rules:
 //! - `Follow` of our actor: record the opt-in, accept it, follow back, and fetch the actor.
-//! - `Undo{Follow}` of our actor: drop the opt-in, tombstone the author, unfollow back, and
-//!   fetch the actor again, so an author whose own flags consent is shown again.
+//! - `Undo{Follow}` of our actor: drop the opt-in, tombstone the author, remove the account
+//!   (without an object tombstone), unfollow back, and fetch the actor again, so an author whose
+//!   own flags consent is shown again. The removal doesn't wait for the fetch: if the actor's
+//!   host is down, the account must not stay served on the withdrawn opt-in.
 //! - `Accept`/`Reject` of our `Follow`: mark it accepted, or drop it.
 //! - `Create`/`Update` from an actor we follow: fetch the object if it is on the actor's
 //!   origin, or the actor is a `Group` (a Lemmy community relays its members' posts).
@@ -88,8 +90,9 @@ pub enum Effect {
     AddAuthorTombstone { actor_uri: String },
     /// Remove an object by URI, with an object tombstone.
     RemoveObject { uri: String },
-    /// Remove an account by URI, with an object tombstone.
-    RemoveAccount { uri: String },
+    /// Remove an account by URI, with an object tombstone if `tombstone`. Without one, a later
+    /// fetch that finds the actor consenting indexes it again.
+    RemoveAccount { uri: String, tombstone: bool },
 }
 
 pub(crate) const ACTOR_TYPES: &[&str] =
@@ -150,6 +153,7 @@ pub fn account_deleted(actor: &str) -> Vec<Effect> {
         },
         Effect::RemoveAccount {
             uri: actor.to_owned(),
+            tombstone: true,
         },
         Effect::AddAuthorTombstone {
             actor_uri: actor.to_owned(),
@@ -297,6 +301,12 @@ fn undo(our_actor: &str, sender: &Sender<'_>, inner: &Value, wrapped: bool) -> V
             Effect::AddAuthorTombstone {
                 actor_uri: actor.clone(),
             },
+            // Before the refetch, so the refetch's re-index (if the actor's own flags consent)
+            // lands after it.
+            Effect::RemoveAccount {
+                uri: actor.clone(),
+                tombstone: false,
+            },
             Effect::Unfollow {
                 actor_uri: actor.clone(),
             },
@@ -417,6 +427,10 @@ mod tests {
             },
             Effect::AddAuthorTombstone {
                 actor_uri: actor.into(),
+            },
+            Effect::RemoveAccount {
+                uri: actor.into(),
+                tombstone: false,
             },
             Effect::Unfollow {
                 actor_uri: actor.into(),

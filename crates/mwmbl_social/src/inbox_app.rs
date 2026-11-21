@@ -471,11 +471,11 @@ impl InboxApp {
                 }])
                 .await;
             }
-            Effect::RemoveAccount { uri } => {
+            Effect::RemoveAccount { uri, tombstone } => {
                 self.write(vec![Action::RemoveAccount {
                     uri,
                     record: None,
-                    tombstone: true,
+                    tombstone,
                 }])
                 .await;
             }
