@@ -54,7 +54,7 @@ If PR 0 isn't merged quickly, all fix PRs stack on `audit/2026-11-19` instead.
 |---|---|---|---|---|
 | 0 | — | Audit report, ignored tests, fuzz targets, scripts, this plan | main | |
 | **Auth and consent (Critical, High)** |||||
-| 1 | A1 | Cache `(key, owner)` and run `check_key_owner` on every request | main | |
+| 1 | A1 | Cache `(key, owner)` and run `check_key_owner` on every request | main | ✓ |
 | 2 | A2 | When the key document isn't the actor, fetch the owner and require it to list the key with the same PEM | 1 | |
 | 3 | A3, E4 | First find out why A3's test passes. Then ignore a Delete unless it comes from the object's author (decision 1); for an unknown URI, queue a fetch instead of adding a tombstone | 5 | |
 | 4 | A4 | Non-Group `Block` with `removeData` is only accepted from the site actor, or dropped | main | |

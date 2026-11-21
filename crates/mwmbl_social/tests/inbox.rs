@@ -895,7 +895,6 @@ async fn settle() {
 }
 
 #[tokio::test]
-#[ignore = "AUDIT: A1 - fails until fixed"]
 async fn audit_a1_a_cached_key_signs_for_another_actor_on_its_origin() {
     let ours = Ours::start().await;
     let gts = FakeHost::start("gotosocial").await;

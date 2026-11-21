@@ -74,6 +74,14 @@ pub struct FollowSettings {
     pub outbox_backfill_pages: usize,
 }
 
+/// A fetched key and what its document said about it. The owner is checked against the
+/// activity's actor on every request, cached or not (audit A1).
+#[derive(Clone)]
+struct CachedKey {
+    info: PublicKeyInfo,
+    key: RsaVerifyingKey,
+}
+
 /// A small in-memory map whose entries expire.
 struct Cache<T> {
     entries: HashMap<String, (Instant, T)>,
@@ -141,7 +149,7 @@ struct Inner {
     deliveries: Deliveries,
     queue_cap: usize,
     follows: FollowSettings,
-    keys: Mutex<Cache<RsaVerifyingKey>>,
+    keys: Mutex<Cache<CachedKey>>,
     actors: Mutex<Cache<ActorInfo>>,
     sequence: AtomicU64,
 }
@@ -237,8 +245,8 @@ impl InboxApp {
             })
     }
 
-    /// Fetches the key `key_id` and checks it belongs to `actor`. Remembers the actor's type
-    /// and inbox when the key's document is the actor.
+    /// Fetches the key `key_id`, caches it with its owner and checks it belongs to `actor`.
+    /// Remembers the actor's type and inbox when the key's document is the actor.
     async fn fetch_key(&self, key_id: &str, actor: &str) -> Result<RsaVerifyingKey, VerifyError> {
         let json = match self.inner.fetcher.fetch(key_id).await {
             FetchOutcome::Found { json, .. } => json,
@@ -258,10 +266,23 @@ impl InboxApp {
             find_public_key(&json, key_id).ok_or_else(|| VerifyError::NoKey {
                 key_id: key_id.to_owned(),
             })?;
-        check_key_owner(&info, actor)?;
         let key = RsaVerifyingKey::from_pem(&info.pem).map_err(|_| VerifyError::BadKey {
             key_id: key_id.to_owned(),
         })?;
+        // Cache the key whoever owns it, so a forger naming someone else's key can't make us
+        // fetch it again on every request.
+        self.inner
+            .keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                key_id,
+                CachedKey {
+                    info: info.clone(),
+                    key: key.clone(),
+                },
+            );
+        check_key_owner(&info, actor)?;
         if json.get("id").and_then(Value::as_str) == Some(actor) {
             self.inner
                 .actors
@@ -269,11 +290,6 @@ impl InboxApp {
                 .unwrap_or_else(PoisonError::into_inner)
                 .insert(actor, actor_info(&json));
         }
-        self.inner
-            .keys
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(key_id, key.clone());
         Ok(key)
     }
 
@@ -302,7 +318,9 @@ impl InboxApp {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key_id);
-        if let Some(key) = cached {
+        if let Some(CachedKey { info, key }) = cached {
+            // A key's owner doesn't change with rotation: refuse at once, without a refetch.
+            check_key_owner(&info, actor).map_err(|e| fail(e.into()))?;
             if verify_post(&by, target_uri, headers, body, &key, now).is_ok() {
                 return Ok(by);
             }
