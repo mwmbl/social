@@ -1,6 +1,8 @@
 //! Parsing fetched JSON. Fixtures are shared with `tests/consent/` (read-only).
 
-use apub::objects::{ParseError, html_to_text, parse_actor, parse_post, parse_rfc3339};
+use apub::objects::{
+    MAX_HASHTAGS, ParseError, html_to_text, parse_actor, parse_post, parse_rfc3339,
+};
 use serde_json::{Value, json};
 
 fn load(name: &str) -> Value {
@@ -183,6 +185,31 @@ fn single_hashtag_object_and_missing_content() {
     let p = parse_post(&v).unwrap();
     assert_eq!(p.content_text, "");
     assert_eq!(p.hashtags, vec!["solo"]);
+}
+
+fn post_with_tags(tags: usize) -> Value {
+    let tag: Vec<Value> = (0..tags)
+        .map(|i| json!({"type": "Hashtag", "name": format!("#t{i}")}))
+        .collect();
+    json!({
+        "id": "https://a.example/n/3", "type": "Note", "attributedTo": "https://a.example/u/x",
+        "tag": tag
+    })
+}
+
+#[test]
+fn hashtags_are_capped() {
+    let at_cap = parse_post(&post_with_tags(MAX_HASHTAGS)).unwrap();
+    assert_eq!(at_cap.hashtags.len(), MAX_HASHTAGS);
+    let over = parse_post(&post_with_tags(MAX_HASHTAGS + 1)).unwrap();
+    assert_eq!(over.hashtags, at_cap.hashtags, "the first ones are kept");
+    // Duplicates and non-Hashtag items don't use up the cap.
+    let mut v = post_with_tags(MAX_HASHTAGS);
+    if let Some(Value::Array(tags)) = v.get_mut("tag") {
+        tags.insert(0, json!({"type": "Mention", "name": "@x"}));
+        tags.insert(1, json!({"type": "Hashtag", "name": "#t0"}));
+    }
+    assert_eq!(parse_post(&v).unwrap().hashtags, at_cap.hashtags);
 }
 
 #[test]

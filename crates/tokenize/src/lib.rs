@@ -144,9 +144,17 @@ pub fn field_keys(text: &str, config: &KeyConfig) -> Vec<String> {
     dedupe(keys)
 }
 
+/// Most keys [`query_keys`] returns. Each key costs the search one page read and decode, so
+/// this bounds the work one query can ask for (audit E1). 32 covers a 16-word query's unigrams
+/// and bigrams, which is longer than real searches, while keeping a query to 32 page reads.
+pub const MAX_QUERY_KEYS: usize = 32;
+
 /// The keys to look up for a query: every non-stopword token, every bigram except those of two
-/// stopwords, and all hashtag/mention keys. A query of only stopwords keeps all its tokens and
-/// bigrams, so "The Who" still searches.
+/// stopwords, and all hashtag/mention keys, keeping the first [`MAX_QUERY_KEYS`] in that order.
+/// A query of only stopwords keeps all its tokens and bigrams, so "The Who" still searches.
+///
+/// Query keys are only looked up, never written, so the cap doesn't change any index key and
+/// needs no [`TOKENIZER_VERSION`] bump.
 #[must_use]
 pub fn query_keys(query: &str) -> Vec<String> {
     let tokens = tokenize(query);
@@ -161,7 +169,9 @@ pub fn query_keys(query: &str) -> Vec<String> {
             .map(|(a, b)| format!("{a} {b}")),
     );
     keys.extend(special_keys(query));
-    dedupe(keys)
+    let mut keys = dedupe(keys);
+    keys.truncate(MAX_QUERY_KEYS);
+    keys
 }
 
 #[cfg(test)]

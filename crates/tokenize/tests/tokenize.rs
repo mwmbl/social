@@ -3,7 +3,9 @@
 //! Changing what any of these produce changes index keys, so it means bumping
 //! `TOKENIZER_VERSION` too.
 
-use tokenize::{KeyConfig, TOKENIZER_VERSION, field_keys, query_keys, special_keys, tokenize};
+use tokenize::{
+    KeyConfig, MAX_QUERY_KEYS, TOKENIZER_VERSION, field_keys, query_keys, special_keys, tokenize,
+};
 
 fn toks(text: &str) -> Vec<String> {
     tokenize(text)
@@ -177,4 +179,18 @@ fn query_keys_are_every_non_stopword_token_and_every_bigram() {
 fn a_query_for_only_stopwords_still_searches_them() {
     // "the who" is a band. If dropping stopwords leaves nothing, keep the tokens.
     assert_eq!(query_keys("The Who"), ["the", "who", "the who"]);
+}
+
+#[test]
+fn query_keys_stop_at_the_cap() {
+    // Hashtags give one key each beyond their word, and none of these words are stopwords.
+    let words = |n: usize| -> String { (0..n).map(|i| format!("w{i} ")).collect() };
+    // 16 words give 16 unigrams and 15 bigrams: one under the cap, all kept.
+    assert_eq!(query_keys(&words(16)).len(), 31);
+    // 17 words give 33 keys: the cap keeps the first 32, unigrams before bigrams.
+    let keys = query_keys(&words(17));
+    assert_eq!(keys.len(), MAX_QUERY_KEYS);
+    assert_eq!(keys.first().map(String::as_str), Some("w0"));
+    assert_eq!(keys.get(17).map(String::as_str), Some("w0 w1"));
+    assert!(!keys.iter().any(|k| k == "w15 w16"));
 }

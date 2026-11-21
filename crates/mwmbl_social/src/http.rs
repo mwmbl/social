@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use social_index::{SocialAccount, SocialPost, SocialReader, Tombstones};
 
 use crate::now_secs;
-use crate::search::{self, DEFAULT_LIMIT, MAX_LIMIT};
+use crate::search::{self, DEFAULT_LIMIT, MAX_LIMIT, MAX_QUERY_BYTES};
 
 const NODEINFO_CONTENT_TYPE: &str =
     "application/json; profile=\"http://nodeinfo.diaspora.software/ns/schema/2.1#\"";
@@ -140,6 +140,9 @@ fn common_params(params: &HashMap<String, String>) -> Result<(String, usize), &'
     if q.is_empty() {
         return Err("the `q` parameter is required");
     }
+    if q.len() > MAX_QUERY_BYTES {
+        return Err("`q` is longer than 512 bytes");
+    }
     let limit = match params.get("limit").map(|l| l.trim()) {
         None | Some("") => DEFAULT_LIMIT,
         Some(text) => match text.parse::<usize>() {
@@ -247,6 +250,24 @@ mod tests {
             params(&[("q", "a"), ("limit", "lots")]),
         ] {
             assert!(common_params(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn q_is_capped_in_bytes() {
+        // 'é' is two bytes, so a multi-byte query is measured in bytes, not chars.
+        let at_cap = "é".repeat(MAX_QUERY_BYTES / 2);
+        assert!(matches!(common_params(&params(&[("q", &at_cap)])), Ok((q, _)) if q == at_cap));
+        // Surrounding spaces are trimmed before the length is checked.
+        let padded = format!("  {at_cap}  ");
+        assert!(common_params(&params(&[("q", &padded)])).is_ok());
+        for bad in [format!("{at_cap}a"), "a".repeat(MAX_QUERY_BYTES + 1)] {
+            let bad = params(&[("q", &bad)]);
+            // The message names the cap, so it must follow the constant.
+            assert!(
+                matches!(common_params(&bad), Err(m) if m.contains(&MAX_QUERY_BYTES.to_string())),
+                "{bad:?}"
+            );
         }
     }
 }
