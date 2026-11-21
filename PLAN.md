@@ -812,10 +812,13 @@ follow opt-in, admin follows, outbox backfill and crawl submissions with robots.
   target URI is `base_url` plus the request path. The `keyId` must be on the actor's origin
   (otherwise it is not fetched). The key is fetched with a signed `GET`, found in the actor's
   `publicKey` (object or array) or a key document with an `owner`, and its owner must be the
-  activity's `actor`, on the key's own origin. Otherwise 401. Keys are cached in memory for an
-  hour; a cached key that fails is refetched once (rotation). A `Delete` of an actor by itself
-  whose key (`<actor>#…`) answers 404/410 is taken as the account's deletion, since its key is
-  gone with it.
+  activity's `actor`, on the key's own origin. A key document that isn't the owner proves
+  nothing by itself: the owner is fetched too, and its `publicKey` (object or array) must list
+  that key id with the same PEM (whitespace aside). Otherwise 401. Keys are cached in memory
+  for an hour with their owner and whether the owner lists them, both checked on every request,
+  cached or not; a key the owner doesn't list is refused without a refetch until it expires,
+  and a cached key that fails the signature is refetched once (rotation). A `Delete` of an actor by itself whose key (`<actor>#…`)
+  answers 404/410 is taken as the account's deletion, since its key is gone with it.
 - Verified deliveries get 202 and are handled on a spawned task. The JSON is never stored,
   indexed or logged: `activities::handle` (pure, table-tested) turns it into effects, which the
   binary applies. Objects are queued (kind from the embedded type, reason `announce`, an

@@ -74,6 +74,25 @@ pub struct FollowSettings {
     pub outbox_backfill_pages: usize,
 }
 
+/// A fetched key and what its document said about it. The owner is checked against the
+/// activity's actor on every request, cached or not (audit A1).
+#[derive(Clone)]
+struct CachedKey {
+    info: PublicKeyInfo,
+    key: RsaVerifyingKey,
+    listed: Listed,
+}
+
+/// Whether the key's owner lists it with the same PEM (audit A2). A key found in its owner's
+/// own document is listed by definition; one in a document of its own needs the owner fetched.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Listed {
+    Yes,
+    No,
+    /// Not looked at, because the key failed the owner check when it was fetched.
+    Unchecked,
+}
+
 /// A small in-memory map whose entries expire.
 struct Cache<T> {
     entries: HashMap<String, (Instant, T)>,
@@ -129,6 +148,14 @@ enum VerifyError {
     Owner(#[from] apub::inbox::OwnerError),
     #[error("key {key_id} is not a usable RSA key")]
     BadKey { key_id: String },
+    #[error("owner {owner} of key {key_id} could not be fetched: {reason}")]
+    OwnerUnavailable {
+        key_id: String,
+        owner: String,
+        reason: String,
+    },
+    #[error("owner {owner} does not list key {key_id} with the same PEM")]
+    NotListed { key_id: String, owner: String },
 }
 
 struct Inner {
@@ -141,7 +168,7 @@ struct Inner {
     deliveries: Deliveries,
     queue_cap: usize,
     follows: FollowSettings,
-    keys: Mutex<Cache<RsaVerifyingKey>>,
+    keys: Mutex<Cache<CachedKey>>,
     actors: Mutex<Cache<ActorInfo>>,
     sequence: AtomicU64,
 }
@@ -155,6 +182,18 @@ pub struct InboxApp {
 impl std::fmt::Debug for InboxApp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InboxApp").finish_non_exhaustive()
+    }
+}
+
+/// Whether two PEM encodings are the same, ignoring line breaks and other whitespace.
+fn same_pem(a: &str, b: &str) -> bool {
+    a.split_whitespace().eq(b.split_whitespace())
+}
+
+fn not_listed(info: &PublicKeyInfo) -> VerifyError {
+    VerifyError::NotListed {
+        key_id: info.id.clone(),
+        owner: info.owner.clone(),
     }
 }
 
@@ -237,8 +276,8 @@ impl InboxApp {
             })
     }
 
-    /// Fetches the key `key_id` and checks it belongs to `actor`. Remembers the actor's type
-    /// and inbox when the key's document is the actor.
+    /// Fetches the key `key_id`, caches it with its owner and checks it belongs to `actor`.
+    /// Remembers the actor's type and inbox when the key's document is the actor.
     async fn fetch_key(&self, key_id: &str, actor: &str) -> Result<RsaVerifyingKey, VerifyError> {
         let json = match self.inner.fetcher.fetch(key_id).await {
             FetchOutcome::Found { json, .. } => json,
@@ -258,23 +297,80 @@ impl InboxApp {
             find_public_key(&json, key_id).ok_or_else(|| VerifyError::NoKey {
                 key_id: key_id.to_owned(),
             })?;
-        check_key_owner(&info, actor)?;
         let key = RsaVerifyingKey::from_pem(&info.pem).map_err(|_| VerifyError::BadKey {
             key_id: key_id.to_owned(),
         })?;
-        if json.get("id").and_then(Value::as_str) == Some(actor) {
+        let owned = check_key_owner(&info, actor);
+        let in_owner = json.get("id").and_then(Value::as_str) == Some(info.owner.as_str());
+        // A key document of its own only names its owner: the owner must list it too (A2).
+        let listed = if in_owner {
+            Listed::Yes
+        } else if owned.is_ok() {
+            self.owner_lists(&info).await?
+        } else {
+            Listed::Unchecked
+        };
+        // Cache the key whoever owns it, so a forger naming someone else's key can't make us
+        // fetch it again on every request.
+        self.inner
+            .keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                key_id,
+                CachedKey {
+                    info: info.clone(),
+                    key: key.clone(),
+                    listed,
+                },
+            );
+        owned?;
+        if listed == Listed::No {
+            return Err(not_listed(&info));
+        }
+        if in_owner {
             self.inner
                 .actors
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .insert(actor, actor_info(&json));
         }
+        Ok(key)
+    }
+
+    /// Fetches the owner of a key served from a document of its own, and finds whether its
+    /// `publicKey` (an object or an array) lists that key id with the same PEM.
+    async fn owner_lists(&self, info: &PublicKeyInfo) -> Result<Listed, VerifyError> {
+        let owner = info.owner.as_str();
+        let json = match self.inner.fetcher.fetch(owner).await {
+            FetchOutcome::Found { json, .. } => json,
+            other => {
+                return Err(VerifyError::OwnerUnavailable {
+                    key_id: info.id.clone(),
+                    owner: owner.to_owned(),
+                    reason: format!("{other:?}"),
+                });
+            }
+        };
+        if json.get("id").and_then(Value::as_str) != Some(owner) {
+            tracing::debug!(
+                key_id = info.id,
+                owner,
+                "a key's owner document has another id"
+            );
+            return Ok(Listed::No);
+        }
+        let listed = find_public_key(&json, &info.id)
+            .is_some_and(|k| k.owner == owner && same_pem(&k.pem, &info.pem));
+        if !listed {
+            return Ok(Listed::No);
+        }
         self.inner
-            .keys
+            .actors
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(key_id, key.clone());
-        Ok(key)
+            .insert(owner, actor_info(&json));
+        Ok(Listed::Yes)
     }
 
     /// Verifies a delivery from `actor`. Returns the signer.
@@ -302,8 +398,16 @@ impl InboxApp {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key_id);
-        if let Some(key) = cached {
-            if verify_post(&by, target_uri, headers, body, &key, now).is_ok() {
+        if let Some(CachedKey { info, key, listed }) = cached {
+            // A key's owner doesn't change with rotation, nor whether the owner listed it when
+            // last fetched: refuse at once, without a refetch.
+            check_key_owner(&info, actor).map_err(|e| fail(e.into()))?;
+            if listed == Listed::No {
+                return Err(fail(not_listed(&info)));
+            }
+            if listed == Listed::Yes
+                && verify_post(&by, target_uri, headers, body, &key, now).is_ok()
+            {
                 return Ok(by);
             }
             // Perhaps the key was rotated: fetch it once more.
