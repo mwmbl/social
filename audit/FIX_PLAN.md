@@ -40,9 +40,9 @@ If PR 0 isn't merged quickly, all fix PRs stack on `audit/2026-11-19` instead.
    row (about 18 days at the default sweep). Needs a counter (bounded, per host, in `hosts`).
 3. **C1 foreign URIs in announcements:** drop URIs not on the registration's host and log the
    count.
-4. **C4 admin API:** admin routes get their own `admin_listen` address, which defaults to
-   `127.0.0.1:8081`, and are never served on the public listener. Crawl routes stay public,
-   because Mwmbl's crawler calls them from elsewhere. Nothing is
+4. **C4 admin API:** admin and crawl routes get their own `admin_listen` address, which
+   defaults to `127.0.0.1:8081`, and are never served on the public listener. The crawler will
+   be a dedicated one that runs on the same machine or connects through it. Nothing is
    deployed yet, so this breaks no one. Update the Dockerfile, the dev compose files and the
    README to match.
 5. **E9 durable inbox removals:** this PR only makes a dead writer stop the process. Queueing
