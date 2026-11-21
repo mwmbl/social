@@ -43,7 +43,6 @@ async fn sweep_everything(env: &mut TestEnv) {
 /// deduplicated into the in-flight queue row, and `finish` then deletes that row. The delete is
 /// never fetched, and the post stays searchable until its revalidation, days later.
 #[tokio::test]
-#[ignore = "AUDIT: D1 - fails until fixed"]
 async fn a_delete_announced_while_the_create_is_in_flight_is_not_lost() {
     let mut env = TestEnv::new().await;
     let uri = env.fake.url("/notes/public");

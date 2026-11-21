@@ -259,8 +259,11 @@ explicit user and admin actions.
 - **`subscriptions`**: registration_id, remote subscription id, category, type, created_at.
 - **`backfills`**: registration_id, remote id, category, state, more_available.
 - **`fetch_queue`**: uri, kind hint, reason (announce/backfill/revalidate/crawl), not_before,
-  attempts, last_error. It is bounded: deduplicate by URI and cap its length. When it is full,
-  backfill and revalidation work is deferred, and announcements take priority.
+  attempts, last_error, generation. It is bounded: deduplicate by URI and cap its length. When
+  it is full, backfill and revalidation work is deferred, and announcements take priority. A
+  duplicate enqueue bumps the row's generation, and the worker completes or fails a row only at
+  the generation it read, so a request that arrives while the URI is being fetched (a `delete`
+  after a `create`) keeps the row and the URI is fetched again.
 - **`hosts`**: host, signature scheme that works (9421/cavage), backoff_until, blocked flag,
   nodeinfo `software.name` with its check time (for Lemmy consent and crawl submissions), and a
   cached robots.txt verdict with its fetch time (Stage 3).

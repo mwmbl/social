@@ -773,7 +773,7 @@ impl Worker {
         now: i64,
     ) -> Result<Finished, StoreError> {
         let Some(retry) = &processed.retry else {
-            store.complete(&item.uri)?;
+            complete(store, item)?;
             return Ok(Finished::Completed);
         };
         if item.attempts + 1 >= self.config.max_transient_attempts {
@@ -784,7 +784,7 @@ impl Worker {
                 reason = retry.reason,
                 "giving up on a fetch"
             );
-            store.complete(&item.uri)?;
+            complete(store, item)?;
             return Ok(Finished::GaveUp);
         }
         let retry_at = retry
@@ -797,7 +797,12 @@ impl Worker {
             reason = retry.reason,
             "will retry"
         );
-        store.fail(&item.uri, &retry.reason, retry_at)?;
+        if !store.fail(&item.uri, item.generation, &retry.reason, retry_at)? {
+            tracing::debug!(
+                uri = item.uri,
+                "enqueued again while in flight; not rescheduled"
+            );
+        }
         Ok(Finished::Rescheduled { retry_at })
     }
 
@@ -947,6 +952,18 @@ impl Worker {
     }
 }
 
+/// Removes `item`'s row unless the URI was enqueued again while it was in flight, in which case
+/// the row stays to be fetched again (audit D1).
+fn complete(store: &Store, item: &QueuedFetch) -> Result<(), StoreError> {
+    if !store.complete(&item.uri, item.generation)? {
+        tracing::debug!(
+            uri = item.uri,
+            "enqueued again while in flight; kept queued"
+        );
+    }
+    Ok(())
+}
+
 /// A queue-shaped item for something fetched without going through the queue (`ingest`).
 #[must_use]
 pub fn adhoc_item(uri: &str, kind: FetchKind, now: i64) -> QueuedFetch {
@@ -960,6 +977,7 @@ pub fn adhoc_item(uri: &str, kind: FetchKind, now: i64) -> QueuedFetch {
         attempts: 0,
         last_error: None,
         enqueued_at: now,
+        generation: 0,
     }
 }
 
