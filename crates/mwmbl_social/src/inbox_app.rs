@@ -38,9 +38,10 @@ use store::{FetchKind, FetchReason, FollowState, NewFetch, Store};
 use tokio::sync::watch;
 
 use crate::activities::{
-    Effect, Sender, account_deleted, activity_actor, handle, self_delete_with_gone_key,
+    DeleteVerdict, Effect, Sender, account_deleted, activity_actor, delete_verdict, handle,
+    self_delete_with_gone_key,
 };
-use crate::decide::Action;
+use crate::decide::{Action, Carried};
 use crate::delivery::Deliveries;
 use crate::follows::{
     ActorInfo, FollowTarget, activity_id, actor_info, fetch_followable, follow_activity, resolve,
@@ -448,17 +449,7 @@ impl InboxApp {
                 uri,
                 kind,
                 delay_secs,
-            } => {
-                let now = now_secs();
-                let item = NewFetch {
-                    uri,
-                    kind,
-                    reason: FetchReason::Announce,
-                    record: None,
-                    not_before: now.saturating_add(delay_secs),
-                };
-                Self::log_store(self.store(|s| s.enqueue(&item, now, self.inner.queue_cap)));
-            }
+            } => self.enqueue(uri, kind, delay_secs),
             Effect::AddAuthorTombstone { actor_uri } => {
                 self.write(vec![Action::AddAuthorTombstone { actor_uri }])
                     .await;
@@ -478,6 +469,75 @@ impl InboxApp {
                     tombstone: true,
                 }])
                 .await;
+            }
+            Effect::DeleteObject {
+                uri,
+                sender,
+                moderator,
+            } => self.delete_object(uri, &sender, moderator).await,
+        }
+    }
+
+    /// Queues `uri` for a fetch from its origin.
+    fn enqueue(&self, uri: String, kind: FetchKind, delay_secs: i64) {
+        let now = now_secs();
+        let item = NewFetch {
+            uri,
+            kind,
+            reason: FetchReason::Announce,
+            record: None,
+            not_before: now.saturating_add(delay_secs),
+        };
+        Self::log_store(self.store(|s| s.enqueue(&item, now, self.inner.queue_cap)));
+    }
+
+    /// A `Delete` of `uri` by `sender`: removed only if the record we store under `uri` is the
+    /// sender's, and fetched from its origin if we store nothing ([`delete_verdict`]).
+    async fn delete_object(&self, uri: String, sender: &str, moderator: bool) {
+        let (posts, accounts) = self.inner.writer.readers();
+        let stored = posts.find(&uri).and_then(|post| match post {
+            Some(post) => Ok(Some(Carried::Post(post))),
+            None => accounts.find(&uri).map(|a| a.map(Carried::Account)),
+        });
+        let stored = match stored {
+            Ok(stored) => stored,
+            Err(e) => {
+                tracing::error!(uri, error = %e, "failed to look up a deleted object; ignoring");
+                return;
+            }
+        };
+        let author = match &stored {
+            Some(Carried::Post(post)) => Some(post.author_uri.as_str()),
+            Some(Carried::Account(account)) => Some(account.uri.as_str()),
+            None => None,
+        };
+        match (delete_verdict(sender, author, moderator), stored) {
+            (DeleteVerdict::Remove, Some(Carried::Post(record))) => {
+                self.write(vec![Action::RemovePost {
+                    uri,
+                    record: Some(record),
+                    tombstone: true,
+                }])
+                .await;
+            }
+            (DeleteVerdict::Remove, Some(Carried::Account(record))) => {
+                self.write(vec![Action::RemoveAccount {
+                    uri,
+                    record: Some(record),
+                    tombstone: true,
+                }])
+                .await;
+            }
+            (DeleteVerdict::Fetch | DeleteVerdict::Remove, _) => {
+                tracing::debug!(uri, sender, "fetching a deleted object to check it is gone");
+                self.enqueue(uri, FetchKind::Unknown, 0);
+            }
+            (DeleteVerdict::Ignore, _) => {
+                tracing::info!(
+                    uri,
+                    sender,
+                    "ignoring a Delete from someone other than the author"
+                );
             }
         }
     }

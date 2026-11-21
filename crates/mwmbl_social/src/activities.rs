@@ -17,8 +17,10 @@
 //!   `Create`/`Update`/`Delete`/`Remove`/`Undo`/`Block`): the inner activity is handled as if
 //!   the community sent it. A boost (a plain object or URI) is ignored: someone else sharing a
 //!   post is not the author's consent.
-//! - `Delete` from any actor, of an object on its origin (or by a followed `Group`, a moderator
-//!   delete): remove it and tombstone it. Of the actor itself: remove the account.
+//! - `Delete` of the actor itself: remove the account. `Delete` from any actor of an object on
+//!   its origin (or from a followed `Group`): checked against what we store, by
+//!   [`delete_verdict`]. Only the stored record's author removes it; for a URI we don't store,
+//!   we fetch it from its origin and let that decide, so no tombstone comes from a claim alone.
 //! - `Remove` from a followed `Group` whose `target` is the group (a moderator removal):
 //!   remove the object.
 //! - `Block` with `removeData` from a followed `Group` or the blocked user's own instance:
@@ -88,6 +90,13 @@ pub enum Effect {
     AddAuthorTombstone { actor_uri: String },
     /// Remove an object by URI, with an object tombstone.
     RemoveObject { uri: String },
+    /// A `Delete` of `uri` by `sender`: look up what we store under `uri` and act on
+    /// [`delete_verdict`]. `moderator` is whether the sender is a community we follow.
+    DeleteObject {
+        uri: String,
+        sender: String,
+        moderator: bool,
+    },
     /// Remove an account by URI, with an object tombstone.
     RemoveAccount { uri: String },
 }
@@ -243,8 +252,10 @@ fn dispatch(our_actor: &str, sender: &Sender<'_>, activity: &Value, wrapped: boo
         }
         "Delete" if !wrapped && object_id == sender.actor => account_deleted(sender.actor),
         "Delete" if object_id != sender.actor && sender.speaks_for(object_id) => {
-            vec![Effect::RemoveObject {
+            vec![Effect::DeleteObject {
                 uri: object_id.to_owned(),
+                sender: actor,
+                moderator: sender.is_group && sender.followed(),
             }]
         }
         "Remove"
@@ -267,6 +278,33 @@ fn dispatch(our_actor: &str, sender: &Sender<'_>, activity: &Value, wrapped: boo
             }]
         }
         _ => Vec::new(),
+    }
+}
+
+/// What to do about a `Delete` of a URI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteVerdict {
+    /// Remove the stored record and tombstone it.
+    Remove,
+    /// Queue a fetch of the URI from its origin, which decides.
+    Fetch,
+    /// Do nothing: the sender isn't the author.
+    Ignore,
+}
+
+/// What a `Delete` of a URI other than the sender means, given the author of what we store
+/// under that URI (a post's `attributedTo`, or an account's own URI), or `None` when we store
+/// nothing. Only the author's word removes a record: anyone else on the same origin could
+/// otherwise remove it. With nothing stored, a fetch lets the origin's 404 or 410 remove the
+/// URI, so a stream of Deletes of made-up URIs adds no tombstones of its own. A followed
+/// community's moderator delete of someone else's post is a reason to revalidate it now.
+#[must_use]
+pub fn delete_verdict(sender: &str, stored_author: Option<&str>, moderator: bool) -> DeleteVerdict {
+    match stored_author {
+        None => DeleteVerdict::Fetch,
+        Some(author) if author == sender => DeleteVerdict::Remove,
+        Some(_) if moderator => DeleteVerdict::Fetch,
+        Some(_) => DeleteVerdict::Ignore,
     }
 }
 
@@ -388,6 +426,14 @@ mod tests {
 
     fn remove(uri: &str) -> Effect {
         Effect::RemoveObject { uri: uri.into() }
+    }
+
+    fn delete(uri: &str, sender: &str, moderator: bool) -> Effect {
+        Effect::DeleteObject {
+            uri: uri.into(),
+            sender: sender.into(),
+            moderator,
+        }
     }
 
     fn note(id: &str) -> Value {
@@ -620,7 +666,7 @@ mod tests {
                 community(),
                 json!({"type": "Announce", "actor": COMMUNITY, "object":
                     {"type": "Delete", "actor": "https://lemmy.example/u/mod", "object": REMOTE_LEMMY_POST}}),
-                vec![remove(REMOTE_LEMMY_POST)],
+                vec![delete(REMOTE_LEMMY_POST, COMMUNITY, true)],
             ),
             (
                 "community announces a removal",
@@ -680,16 +726,16 @@ mod tests {
             ),
             // --- deletes
             (
-                "delete of an object on the sender's origin, from anyone",
+                "delete of an object on the sender's origin, from anyone: checked against the store",
                 stranger(GTS),
                 json!({"type": "Delete", "actor": GTS, "object": GTS_POST}),
-                vec![remove(GTS_POST)],
+                vec![delete(GTS_POST, GTS, false)],
             ),
             (
                 "delete with a tombstone object",
                 stranger(GTS),
                 json!({"type": "Delete", "actor": GTS, "object": {"id": GTS_POST, "type": "Tombstone"}}),
-                vec![remove(GTS_POST)],
+                vec![delete(GTS_POST, GTS, false)],
             ),
             (
                 "delete of an object on another origin",
@@ -705,6 +751,12 @@ mod tests {
                 },
                 json!({"type": "Delete", "actor": COMMUNITY, "object": REMOTE_LEMMY_POST}),
                 vec![],
+            ),
+            (
+                "delete by a community we follow, of a post elsewhere: checked against the store",
+                community(),
+                json!({"type": "Delete", "actor": COMMUNITY, "object": REMOTE_LEMMY_POST}),
+                vec![delete(REMOTE_LEMMY_POST, COMMUNITY, true)],
             ),
             (
                 "delete of the actor itself",
@@ -770,6 +822,58 @@ mod tests {
         ];
         for (name, sender, activity, expected) in cases {
             assert_eq!(handle(US, &sender, &activity), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn delete_verdicts() {
+        use DeleteVerdict::{Fetch, Ignore, Remove};
+        let eve = "https://gts.example/users/eve";
+        let cases = [
+            ("the author deletes its post", GTS, Some(GTS), false, Remove),
+            (
+                "someone else deletes a stored post",
+                eve,
+                Some(GTS),
+                false,
+                Ignore,
+            ),
+            (
+                "someone deletes a stored account",
+                eve,
+                Some("https://gts.example/users/carl"),
+                false,
+                Ignore,
+            ),
+            ("a delete of a URI we don't store", eve, None, false, Fetch),
+            (
+                "the author's delete of a URI we don't store",
+                GTS,
+                None,
+                false,
+                Fetch,
+            ),
+            (
+                "a community moderator deletes a member's post",
+                COMMUNITY,
+                Some(LEMMY_USER),
+                true,
+                Fetch,
+            ),
+            (
+                "a community deletes its own post",
+                COMMUNITY,
+                Some(COMMUNITY),
+                true,
+                Remove,
+            ),
+        ];
+        for (name, sender, stored_author, moderator, expected) in cases {
+            assert_eq!(
+                delete_verdict(sender, stored_author, moderator),
+                expected,
+                "{name}"
+            );
         }
     }
 
