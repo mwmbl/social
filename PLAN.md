@@ -638,6 +638,10 @@ removes it.
 - Account opt-outs (item 7) go through `decide`'s author tombstones. A fetched actor document
   now also replaces the worker's cached copy, so a post processed after an opt-out announcement
   cannot be judged against a stale `indexable: true` (the cache lives for an hour).
+- A post's author refusal only acts on the post's own author (audit D3). `evaluate_post_in`
+  checks that the author document's `id` is the post's `attributedTo` (the URI it was fetched
+  from) and on the post's origin before it reads the author's flags. A mismatch refuses the
+  post alone, so a post can't name another account and get that account removed and tombstoned.
 
 **Done when** the local Mastodon registers with us, enables data_sharing and backfills. New,
 edited and deleted public posts from opted-in accounts show up in or vanish from `search`.

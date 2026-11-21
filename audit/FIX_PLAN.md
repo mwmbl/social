@@ -60,7 +60,7 @@ If PR 0 isn't merged quickly, all fix PRs stack on `audit/2026-11-19` instead.
 | 4 | A4 | Non-Group `Block` with `removeData` is only accepted from the site actor, or dropped | main | |
 | 5 | D1 | Generation number on queue rows; `complete` and `fail` only apply to the generation read | main | |
 | 6 | D2, D6 | `IndexPost`, `IndexAccount`, `ClearAuthorTombstone` carry the fetch start time; the writer refuses them when a newer tombstone exists | 5 | |
-| 7 | D3 | Act on an author's refusal only when the author `id` is its fetch URI and on the post's origin | main | |
+| 7 | D3 | Act on an author's refusal only when the author `id` is its fetch URI and on the post's origin | main | ✓ |
 | 8 | D4 | `undo` of a Follow also removes the account record | main | |
 | 9 | D5 | Count failed revalidations and remove after the limit (decision 2); update `PLAN.md` | 5 | |
 | 10 | D7, D8 | Tombstone whenever the URI lookup misses; require `max_transient_attempts >= REFUSED_ATTEMPTS` | main | |

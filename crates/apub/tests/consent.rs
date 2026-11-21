@@ -214,6 +214,22 @@ fn posts() {
             Err(Refusal::OriginMismatch),
         ),
         (
+            "author document claiming another account refuses consent",
+            m_note.clone(),
+            with(
+                &m_actor,
+                &json!({"id": "https://victim.example/users/v", "discoverable": false}),
+                &[],
+            ),
+            Err(Refusal::AuthorMismatch),
+        ),
+        (
+            "author on another host than the object refuses consent",
+            with(&m_note, &json!({"id": "https://evil.example/notes/1"}), &[]),
+            with(&m_actor, &json!({"discoverable": false}), &[]),
+            Err(Refusal::OriginMismatch),
+        ),
+        (
             "same host, different scheme",
             with(
                 &m_note,

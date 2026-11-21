@@ -230,6 +230,9 @@ pub fn decide_post(
             }
             actions
         }
+        // `evaluate_post_in` reads the author's flags only once the author's `id` is the
+        // post's `attributedTo` (the URI fetched) and on the post's origin, so these refusals
+        // never act on an account the post merely names (audit D3).
         (Err(Refusal::NotIndexable | Refusal::NotDiscoverable), _) => {
             let mut actions = remove_post(uri, reason, carried);
             actions.extend(account_actions(

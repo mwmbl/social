@@ -191,7 +191,9 @@ pub fn evaluate_post_in(
     let [attributed_to] = authors.as_slice() else {
         return Err(Refusal::MissingAuthor);
     };
-    evaluate_account_in(author, context)?;
+    // Authorship and origin come before the author's flags: a refusal from the author lets the
+    // caller remove that account, so it must only come from the post's own author, on the
+    // post's own origin. Otherwise a post could name any account and get it removed (audit D3).
     let Some(author_id) = id_of(author) else {
         return Err(Refusal::MissingId);
     };
@@ -201,6 +203,7 @@ pub fn evaluate_post_in(
     if origin(object_id).is_none() || origin(object_id) != origin(author_id) {
         return Err(Refusal::OriginMismatch);
     }
+    evaluate_account_in(author, context)?;
     if !flag(author, "indexable", context) {
         return Err(Refusal::NotIndexable);
     }
