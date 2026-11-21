@@ -4,6 +4,8 @@
 
 mod common;
 
+use std::io::Write;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use common::mastodon::{FakeMastodon, public_note};
@@ -12,6 +14,55 @@ use mwmbl_social::config::Config;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+/// The most recent log lines shown when a wait times out.
+const LOG_TAIL_LINES: usize = 400;
+
+/// Every `tracing` event from this process, so a timed-out wait can show what the worker,
+/// queue and writer did. `trending_announcements_feed_trends_and_follow_recommendations` fails
+/// now and then on CI, and only there, waiting for a deleted post to leave trends.
+static LOGS: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+
+struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Starts collecting logs. Both tests in this file share the buffer, since a global subscriber
+/// is the only kind that sees the server's own threads.
+fn capture_logs() {
+    LOGS.get_or_init(|| {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let for_writer = buffer.clone();
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(
+                "mwmbl_social=debug,store=debug,fasp=debug,apub=debug",
+            ))
+            .with_ansi(false)
+            .with_writer(move || LogWriter(for_writer.clone()))
+            .try_init();
+        buffer
+    });
+}
+
+fn print_log_tail() {
+    let Some(buffer) = LOGS.get() else { return };
+    let text = String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(LOG_TAIL_LINES);
+    eprintln!("--- last {} log lines ---", lines.len() - start);
+    for line in &lines[start..] {
+        eprintln!("{line}");
+    }
+}
+
 async fn wait_until(what: &str, mut check: impl AsyncFnMut() -> bool) {
     for _ in 0..300 {
         if check().await {
@@ -19,6 +70,7 @@ async fn wait_until(what: &str, mut check: impl AsyncFnMut() -> bool) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    print_log_tail();
     panic!("timed out waiting for {what}");
 }
 
@@ -68,6 +120,7 @@ async fn trending(fake: &FakeMastodon, query: &str) -> Vec<(String, u64)> {
 
 #[tokio::test]
 async fn trending_announcements_feed_trends_and_follow_recommendations() {
+    capture_logs();
     let fake = FakeMastodon::start().await;
     fake.set_doc(
         "/notes/n1",
