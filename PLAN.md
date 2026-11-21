@@ -573,11 +573,14 @@ removes it.
    events are accepted only from a `trends` subscription, and lifecycle events only from a
    `lifecycle` one (Stage 4 routes `trending` to the trend state); at most 1000 `http(s)` URIs
    are taken per request, each once (a repeat in one announcement counts once, so it cannot
-   inflate trends); a malformed body gets 422. URIs not on the registration's host (compared as
-   `uri_host_key` compares them, against the registration's FASP base URL) are dropped, and
-   the count is logged with the registration id and host (the URIs only at debug): a server
-   announces its own objects, and a foreign URI would make it a way to point our fetcher at
-   third parties. The rest of the announcement is still handled, even if no URI is left.
+   inflate trends); a malformed body gets 422. URIs on other hosts are kept: the data sharing
+   spec says servers "MUST share not only local but also remote content with the FASP", so
+   each URI is fetched from its own origin and judged there. The count of URIs not on the
+   registration's host (compared as `uri_host_key` compares them, against the registration's
+   FASP base URL) is logged at info with the registration id and host, and the URIs only at
+   debug, so a server pointing our fetcher at third parties is visible. Bounding that is the
+   job of the announce queue ceiling and the global outbound limit (`audit/FIX_PLAN.md` rows
+   18 and 20).
 6. Tune the sweep's revalidation against real servers: spread the fetches and respect per-host
    budgets, so a weekly pass doesn't overload a big host. (Done: `mwmbl_social::pacing`.)
    - The worker reads up to 4 due candidates per free slot (at most 256) and passes over,

@@ -124,18 +124,19 @@ fn clean_uris(raw: Vec<serde_json::Value>) -> Vec<String> {
 }
 
 impl Announcement {
-    /// Keeps only the URIs on the announcing registration's host, as compared by
-    /// [`uri_host_key`] (`base_url` is the registration's FASP base URL), and returns the URIs
-    /// it dropped. A server announces its own objects, so a URI elsewhere would only make us
-    /// fetch from third parties on its say-so (audit C1). If `base_url` has no host, every
-    /// URI is dropped.
-    pub fn retain_host_of(&mut self, base_url: &str) -> Vec<String> {
+    /// The URIs not on the announcing registration's host, as compared by [`uri_host_key`]
+    /// (`base_url` is the registration's FASP base URL). They are kept: the data sharing spec
+    /// says servers "MUST share not only local but also remote content with the FASP", so a
+    /// foreign URI is normal. The handler only counts and logs them, so abuse stays visible.
+    /// If `base_url` has no host, every URI counts as foreign.
+    #[must_use]
+    pub fn foreign_uris(&self, base_url: &str) -> Vec<&str> {
         let own = uri_host_key(base_url);
-        let (kept, dropped) = std::mem::take(&mut self.object_uris)
-            .into_iter()
-            .partition(|uri| own.is_some() && uri_host_key(uri) == own);
-        self.object_uris = kept;
-        dropped
+        self.object_uris
+            .iter()
+            .filter(|uri| own.is_none() || uri_host_key(uri) != own)
+            .map(String::as_str)
+            .collect()
     }
 }
 
@@ -317,34 +318,31 @@ mod tests {
     }
 
     #[test]
-    fn only_uris_on_the_registrations_host_are_kept() {
+    fn uris_on_other_hosts_are_counted_as_foreign_but_kept() {
         let base = "https://m.example/api/fasp";
-        // Same host: kept, whatever the case or the explicit default port.
-        let mut same = with_uris(&["https://m.example/1", "https://M.Example:443/2"]);
-        assert_eq!(same.retain_host_of(base).len(), 0);
-        assert_eq!(same.object_uris.len(), 2);
-        // Another host: dropped.
-        let mut foreign = with_uris(&["https://victim.example/1"]);
-        assert_eq!(foreign.retain_host_of(base), ["https://victim.example/1"]);
-        assert_eq!(foreign.object_uris.len(), 0);
-        // A mixed batch keeps the server's own URIs in order. A subdomain, another port and
-        // a lookalike suffix are other hosts.
-        let mut mixed = with_uris(&[
+        // Same host, whatever the case or the explicit default port: not foreign.
+        let same = with_uris(&["https://m.example/1", "https://M.Example:443/2"]);
+        assert_eq!(same.foreign_uris(base).len(), 0);
+        // A subdomain, another port and a lookalike suffix are other hosts. Nothing is removed.
+        let mixed = with_uris(&[
             "https://m.example/1",
             "https://cdn.m.example/2",
             "https://m.example:8443/3",
             "https://m.example.evil/4",
             "http://m.example/5",
         ]);
-        assert_eq!(mixed.retain_host_of(base).len(), 3);
         assert_eq!(
-            mixed.object_uris,
-            ["https://m.example/1", "http://m.example/5"]
+            mixed.foreign_uris(base),
+            [
+                "https://cdn.m.example/2",
+                "https://m.example:8443/3",
+                "https://m.example.evil/4"
+            ]
         );
-        // A base URL without a host keeps nothing.
-        let mut no_host = with_uris(&["https://m.example/1"]);
-        assert_eq!(no_host.retain_host_of("not a url").len(), 1);
-        assert_eq!(no_host.object_uris.len(), 0);
+        assert_eq!(mixed.object_uris.len(), 5);
+        // A base URL without a host makes every URI foreign.
+        let no_host = with_uris(&["https://m.example/1"]);
+        assert_eq!(no_host.foreign_uris("not a url").len(), 1);
     }
 
     #[test]

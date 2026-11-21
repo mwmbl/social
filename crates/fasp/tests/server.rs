@@ -370,7 +370,7 @@ fn received(env: &Env) -> Vec<(i64, fasp::announcement::Announcement)> {
     env.ours.state.announcements.lock().unwrap().clone()
 }
 
-/// An object URI on the fake server's own host, the only host its announcements may name.
+/// An object URI on the fake server's own host.
 fn own(env: &Env, n: u32) -> String {
     format!("{}/notes/{n}", env.mastodon.origin)
 }
@@ -509,26 +509,36 @@ async fn trending_events_are_handed_over_only_from_a_trends_subscription() {
     assert_eq!(got[0].1.object_uris, [own(&env, 1)]);
 }
 
+/// The spec has servers share remote content too, so URIs on other hosts are handed over
+/// with the server's own (audit C1, `audit/FIX_PLAN.md` decision 3), and a URI repeated in
+/// one announcement is taken once, in first-seen order (audit C2).
 #[tokio::test]
-async fn announced_uris_on_other_hosts_are_dropped_and_repeats_collapsed() {
+async fn announced_uris_on_other_hosts_are_kept_and_repeats_collapsed() {
     let env = Env::new().await;
     set_up_sources(&env);
     env.enable_data_sharing_in_store();
     let sub = json!({"subscription": {"id": "12"}});
     let mixed = json!({"eventType": "new", "objectUris": [
-        own(&env, 1), "https://victim.example/1", own(&env, 2), own(&env, 1),
-        "https://victim.example/1",
+        own(&env, 1), "https://remote.example/1", own(&env, 2), own(&env, 1),
+        "https://remote.example/1",
     ]});
     let reply = announce(&env, &announcement_body(&sub, mixed)).await;
     assert_eq!(reply.status, 204);
-    // Only foreign URIs: the announcement is still handed over, with none left.
-    let foreign = json!({"eventType": "new", "objectUris": ["https://victim.example/2"]});
+    // Only foreign URIs: handed over as they are.
+    let foreign = json!({"eventType": "new", "objectUris": ["https://remote.example/2"]});
     let reply = announce(&env, &announcement_body(&sub, foreign)).await;
     assert_eq!(reply.status, 204);
     let got = received(&env);
     assert_eq!(got.len(), 2);
-    assert_eq!(got[0].1.object_uris, [own(&env, 1), own(&env, 2)]);
-    assert_eq!(got[1].1.object_uris.len(), 0);
+    assert_eq!(
+        got[0].1.object_uris,
+        [
+            own(&env, 1),
+            "https://remote.example/1".to_owned(),
+            own(&env, 2)
+        ]
+    );
+    assert_eq!(got[1].1.object_uris, ["https://remote.example/2"]);
 }
 
 #[tokio::test]

@@ -151,9 +151,10 @@ fn is_own_source<S: FaspState>(
 /// `POST /data_sharing/v0/announcements`. Malformed bodies get 422. Everything else gets 204,
 /// including announcements we drop (`data_sharing` not enabled, an id that is not ours or of
 /// the wrong subscription type, trending accounts), since the server cannot do anything useful with an error.
-/// URIs not on the registration's host are dropped and counted; the rest are handed over.
+/// URIs not on the registration's host are counted and logged, but handed over with the rest:
+/// the spec has servers share remote content too (audit C1, `audit/FIX_PLAN.md` decision 3).
 async fn announcements<S: FaspState>(state: &S, registration: &Registration, body: &[u8]) -> Reply {
-    let mut announcement = match parse_announcement(body) {
+    let announcement = match parse_announcement(body) {
         Ok(Some(announcement)) => announcement,
         Ok(None) => return Reply::no_content(),
         Err(e) => {
@@ -189,17 +190,17 @@ async fn announcements<S: FaspState>(state: &S, registration: &Registration, bod
         }
         Err(e) => return store_failure(registration, &e),
     }
-    let dropped = announcement.retain_host_of(&registration.base_url);
-    if !dropped.is_empty() {
+    let foreign = announcement.foreign_uris(&registration.base_url);
+    if !foreign.is_empty() {
         tracing::info!(
             registration = registration.id,
             host = registration.base_url,
-            dropped = dropped.len(),
-            kept = announcement.object_uris.len(),
-            "dropped announced URIs not on the registration's host"
+            foreign = foreign.len(),
+            total = announcement.object_uris.len(),
+            "announced URIs not on the registration's host"
         );
-        tracing::debug!(registration = registration.id, uris = ?dropped,
-            "announced URIs dropped for their host");
+        tracing::debug!(registration = registration.id, uris = ?foreign,
+            "announced URIs not on the registration's host");
     }
     state.on_announcement(registration.id, announcement).await;
     Reply::no_content()
