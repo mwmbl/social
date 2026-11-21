@@ -370,6 +370,11 @@ fn received(env: &Env) -> Vec<(i64, fasp::announcement::Announcement)> {
     env.ours.state.announcements.lock().unwrap().clone()
 }
 
+/// An object URI on the fake server's own host.
+fn own(env: &Env, n: u32) -> String {
+    format!("{}/notes/{n}", env.mastodon.origin)
+}
+
 #[tokio::test]
 async fn announcements_are_handed_over_when_enabled_and_known() {
     let env = Env::new().await;
@@ -380,7 +385,7 @@ async fn announcements_are_handed_over_when_enabled_and_known() {
         &env,
         &announcement_body(
             &sub,
-            json!({"eventType": "new", "objectUris": ["https://a.example/1", "ftp://x/2"]}),
+            json!({"eventType": "new", "objectUris": [own(&env, 1), "ftp://x/2"]}),
         ),
     )
     .await;
@@ -390,7 +395,7 @@ async fn announcements_are_handed_over_when_enabled_and_known() {
         &env,
         &announcement_body(
             &backfill,
-            json!({"moreObjectsAvailable": true, "objectUris": ["https://a.example/2"]}),
+            json!({"moreObjectsAvailable": true, "objectUris": [own(&env, 2)]}),
         ),
     )
     .await;
@@ -406,7 +411,7 @@ async fn announcements_are_handed_over_when_enabled_and_known() {
             event: EventType::New
         }
     );
-    assert_eq!(got[0].1.object_uris, vec!["https://a.example/1".to_owned()]);
+    assert_eq!(got[0].1.object_uris, vec![own(&env, 1)]);
     assert_eq!(
         got[1].1.source,
         AnnouncementSource::Backfill {
@@ -421,7 +426,7 @@ async fn announcements_are_dropped_with_204_when_not_ours_or_not_enabled() {
     let env = Env::new().await;
     set_up_sources(&env);
     let sub = |id: &str| json!({"subscription": {"id": id}});
-    let uris = json!({"eventType": "new", "objectUris": ["https://a.example/1"]});
+    let uris = json!({"eventType": "new", "objectUris": [own(&env, 1)]});
 
     // data_sharing not enabled.
     let reply = announce(&env, &announcement_body(&sub("12"), uris.clone())).await;
@@ -439,7 +444,7 @@ async fn announcements_are_dropped_with_204_when_not_ours_or_not_enabled() {
         &env,
         &announcement_body(
             &json!({"backfillRequest": {"id": "12"}}),
-            json!({"moreObjectsAvailable": false, "objectUris": ["https://a.example/1"]}),
+            json!({"moreObjectsAvailable": false, "objectUris": [own(&env, 1)]}),
         ),
     )
     .await;
@@ -449,7 +454,7 @@ async fn announcements_are_dropped_with_204_when_not_ours_or_not_enabled() {
         &env,
         &announcement_body(
             &sub("12"),
-            json!({"eventType": "trending", "objectUris": ["https://a.example/1"]}),
+            json!({"eventType": "trending", "objectUris": [own(&env, 1)]}),
         ),
     )
     .await;
@@ -470,8 +475,8 @@ async fn trending_events_are_handed_over_only_from_a_trends_subscription() {
         .unwrap();
     env.enable_data_sharing_in_store();
     let sub = |id: &str| json!({"subscription": {"id": id}});
-    let trending = json!({"eventType": "trending", "objectUris": ["https://a.example/1"]});
-    let new = json!({"eventType": "new", "objectUris": ["https://a.example/2"]});
+    let trending = json!({"eventType": "trending", "objectUris": [own(&env, 1)]});
+    let new = json!({"eventType": "new", "objectUris": [own(&env, 2)]});
     // Wrong pairings are dropped: trending on the lifecycle subscription, new on the trends one.
     assert_eq!(
         announce(&env, &announcement_body(&sub("12"), trending.clone()))
@@ -501,7 +506,39 @@ async fn trending_events_are_handed_over_only_from_a_trends_subscription() {
             event: EventType::Trending
         }
     );
-    assert_eq!(got[0].1.object_uris, ["https://a.example/1"]);
+    assert_eq!(got[0].1.object_uris, [own(&env, 1)]);
+}
+
+/// The spec has servers share remote content too, so URIs on other hosts are handed over
+/// with the server's own (audit C1, `audit/FIX_PLAN.md` decision 3), and a URI repeated in
+/// one announcement is taken once, in first-seen order (audit C2).
+#[tokio::test]
+async fn announced_uris_on_other_hosts_are_kept_and_repeats_collapsed() {
+    let env = Env::new().await;
+    set_up_sources(&env);
+    env.enable_data_sharing_in_store();
+    let sub = json!({"subscription": {"id": "12"}});
+    let mixed = json!({"eventType": "new", "objectUris": [
+        own(&env, 1), "https://remote.example/1", own(&env, 2), own(&env, 1),
+        "https://remote.example/1",
+    ]});
+    let reply = announce(&env, &announcement_body(&sub, mixed)).await;
+    assert_eq!(reply.status, 204);
+    // Only foreign URIs: handed over as they are.
+    let foreign = json!({"eventType": "new", "objectUris": ["https://remote.example/2"]});
+    let reply = announce(&env, &announcement_body(&sub, foreign)).await;
+    assert_eq!(reply.status, 204);
+    let got = received(&env);
+    assert_eq!(got.len(), 2);
+    assert_eq!(
+        got[0].1.object_uris,
+        [
+            own(&env, 1),
+            "https://remote.example/1".to_owned(),
+            own(&env, 2)
+        ]
+    );
+    assert_eq!(got[1].1.object_uris, ["https://remote.example/2"]);
 }
 
 #[tokio::test]

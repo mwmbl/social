@@ -1,5 +1,8 @@
 //! Parsing of `POST /data_sharing/v0/announcements` bodies.
 
+use std::collections::HashSet;
+
+use apub::fetch::uri_host_key;
 use serde::Deserialize;
 use store::Category;
 use thiserror::Error;
@@ -43,7 +46,7 @@ pub enum AnnouncementSource {
     },
 }
 
-/// A validated announcement. `object_uris` holds only `http(s)` URIs, at most
+/// A validated announcement. `object_uris` holds only `http(s)` URIs, each once, at most
 /// [`MAX_OBJECT_URIS`] of them; it can be empty (a final, empty backfill batch).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Announcement {
@@ -103,7 +106,11 @@ struct RawAnnouncement {
     more_objects_available: Option<bool>,
 }
 
+/// The announced URIs we take: `http(s)` strings no longer than [`MAX_URI_LEN`], from the
+/// first [`MAX_OBJECT_URIS`] entries, each once in first-seen order. A URI repeated in one
+/// announcement counts once, so repeating it cannot inflate trends (audit C2).
 fn clean_uris(raw: Vec<serde_json::Value>) -> Vec<String> {
+    let mut seen = HashSet::new();
     raw.into_iter()
         .take(MAX_OBJECT_URIS)
         .filter_map(|v| match v {
@@ -112,7 +119,25 @@ fn clean_uris(raw: Vec<serde_json::Value>) -> Vec<String> {
         })
         .filter(|s| s.len() <= MAX_URI_LEN)
         .filter(|s| Url::parse(s).is_ok_and(|u| matches!(u.scheme(), "http" | "https")))
+        .filter(|s| seen.insert(s.clone()))
         .collect()
+}
+
+impl Announcement {
+    /// The URIs not on the announcing registration's host, as compared by [`uri_host_key`]
+    /// (`base_url` is the registration's FASP base URL). They are kept: the data sharing spec
+    /// says servers "MUST share not only local but also remote content with the FASP", so a
+    /// foreign URI is normal. The handler only counts and logs them, so abuse stays visible.
+    /// If `base_url` has no host, every URI counts as foreign.
+    #[must_use]
+    pub fn foreign_uris(&self, base_url: &str) -> Vec<&str> {
+        let own = uri_host_key(base_url);
+        self.object_uris
+            .iter()
+            .filter(|uri| own.is_none() || uri_host_key(uri) != own)
+            .map(String::as_str)
+            .collect()
+    }
 }
 
 /// Parses an announcement body.
@@ -260,6 +285,64 @@ mod tests {
         );
         let a = parse(&body).unwrap().unwrap();
         assert_eq!(a.object_uris.len(), MAX_OBJECT_URIS);
+    }
+
+    #[test]
+    fn repeated_uris_are_taken_once_in_first_seen_order() {
+        let a = parse(
+            r#"{"source":{"subscription":{"id":"1"}},"category":"content","eventType":"trending",
+                "objectUris":["https://a.example/2","https://a.example/1","https://a.example/2",
+                "https://a.example/1","https://a.example/3"]}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            a.object_uris,
+            [
+                "https://a.example/2",
+                "https://a.example/1",
+                "https://a.example/3"
+            ]
+        );
+    }
+
+    fn with_uris(uris: &[&str]) -> Announcement {
+        Announcement {
+            source: AnnouncementSource::Subscription {
+                remote_id: "1".into(),
+                event: EventType::New,
+            },
+            category: Category::Content,
+            object_uris: uris.iter().map(|u| (*u).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn uris_on_other_hosts_are_counted_as_foreign_but_kept() {
+        let base = "https://m.example/api/fasp";
+        // Same host, whatever the case or the explicit default port: not foreign.
+        let same = with_uris(&["https://m.example/1", "https://M.Example:443/2"]);
+        assert_eq!(same.foreign_uris(base).len(), 0);
+        // A subdomain, another port and a lookalike suffix are other hosts. Nothing is removed.
+        let mixed = with_uris(&[
+            "https://m.example/1",
+            "https://cdn.m.example/2",
+            "https://m.example:8443/3",
+            "https://m.example.evil/4",
+            "http://m.example/5",
+        ]);
+        assert_eq!(
+            mixed.foreign_uris(base),
+            [
+                "https://cdn.m.example/2",
+                "https://m.example:8443/3",
+                "https://m.example.evil/4"
+            ]
+        );
+        assert_eq!(mixed.object_uris.len(), 5);
+        // A base URL without a host makes every URI foreign.
+        let no_host = with_uris(&["https://m.example/1"]);
+        assert_eq!(no_host.foreign_uris("not a url").len(), 1);
     }
 
     #[test]

@@ -24,17 +24,6 @@ async fn wait_until(what: &str, mut check: impl AsyncFnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
-/// Polls `check` for about `millis` and returns whether it ever held.
-async fn becomes_true(millis: u64, mut check: impl FnMut() -> bool) -> bool {
-    for _ in 0..(millis / 50) {
-        if check() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    check()
-}
-
 struct Running {
     addr: std::net::SocketAddr,
     shutdown: watch::Sender<bool>,
@@ -113,43 +102,66 @@ async fn announce(fake: &FakeMastodon, body: &Value) {
     assert_eq!(reply.status, 204);
 }
 
-/// C1: a registration's announcements are not bound to its own host. The server registered as
-/// `127.0.0.1:<port>` announces a URI on another host (`localhost:<port>`, a different fake),
-/// and we fetch it: any registered server (in hosted mode, anyone who signs up) can point our
-/// fetcher at third-party hosts, 1000 URIs per signed request, with no robots.txt check.
+/// C1 (resolved by the spec, `audit/FIX_PLAN.md` decision 3): servers "MUST share not only
+/// local but also remote content with the FASP", so a URI on another host is fetched from its
+/// own origin and judged there. The registered server announces two notes on another host
+/// (a different fake): the public one is indexed, the unlisted one is fetched but not indexed.
+/// Bounding how much fetching announcements can cause is left to rows 18 and 20.
 #[tokio::test]
-#[ignore = "AUDIT: C1 - fails until fixed"]
-async fn announced_uris_on_another_host_are_not_fetched() {
+async fn announced_uris_on_another_host_are_fetched_from_their_origin_and_judged_there() {
     let fake = FakeMastodon::start().await;
-    let victim = FakeHost::start().await;
+    let remote = FakeHost::start().await;
     let running = serve_registered(&fake, &["data_sharing"], |_| {}).await;
-    let victim_uri = victim
-        .url("/notes/public")
-        .replace("127.0.0.1", "localhost");
-    let own_uri = fake.url("/notes/n1");
     let lifecycle = fake.subscription_id("content");
     announce(
         &fake,
-        &event(&lifecycle, "content", "new", &[own_uri, victim_uri]),
+        &event(
+            &lifecycle,
+            "content",
+            "new",
+            &[remote.url("/notes/unlisted"), remote.url("/notes/public")],
+        ),
     )
     .await;
-    wait_until("the server's own note to be fetched", async || {
-        fake.ap_hits("/notes/n1") > 0
+    let http = reqwest::Client::new();
+    let addr = running.addr;
+    let search = async |q: &str| -> bool {
+        let body: Value = http
+            .get(format!("http://{addr}/api/v1/search/posts?q={q}"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .map(|t| serde_json::from_str(&t).unwrap_or(Value::Null))
+            .unwrap();
+        body.as_array().is_some_and(|a| !a.is_empty())
+    };
+    wait_until("the remote public note to be indexed", async || {
+        search("garlic").await
     })
     .await;
-    let fetched_elsewhere = becomes_true(2000, || victim.hits("/notes/public") > 0).await;
+    wait_until("the remote unlisted note to be fetched", async || {
+        remote.hits("/notes/unlisted") > 0
+    })
+    .await;
+    let mut unlisted_indexed = false;
+    for _ in 0..20 {
+        if search("quokka").await {
+            unlisted_indexed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     running.stop().await;
-    assert!(
-        !fetched_elsewhere,
-        "a URI on a host other than the registration's was fetched"
-    );
+    assert!(remote.hits("/notes/public") > 0);
+    assert!(!unlisted_indexed, "an unlisted remote note was indexed");
 }
 
-/// C2: one `trending` announcement that lists the same URI many times counts once per listing,
-/// so a single signed request takes a post to rank 100 in the trends pooled across every
+/// C2 (fixed): one `trending` announcement that lists the same URI many times counts once, so
+/// a single signed request cannot take a post to rank 100 in the trends pooled across every
 /// registration (and its author into everyone's follow recommendations).
 #[tokio::test]
-#[ignore = "AUDIT: C2 - fails until fixed"]
 async fn a_uri_repeated_in_one_trending_announcement_counts_once() {
     let fake = FakeMastodon::start().await;
     let running = serve_registered(&fake, &["data_sharing", "trends"], |_| {}).await;

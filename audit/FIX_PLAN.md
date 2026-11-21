@@ -38,8 +38,15 @@ If PR 0 isn't merged quickly, all fix PRs stack on `audit/2026-11-19` instead.
    6 days.
 2. **D5 an origin that never answers:** remove content after 3 failed revalidation passes in a
    row (about 18 days at the default sweep). Needs a counter (bounded, per host, in `hosts`).
-3. **C1 foreign URIs in announcements:** drop URIs not on the registration's host and log the
-   count.
+3. **C1 foreign URIs in announcements** (revised 2026-11-21, decided by the human): keep
+   them. The data sharing spec (`discovery/data_sharing/v0.1/data_sharing.md`) says "fediverse
+   servers MUST share not only local but also remote content with the FASP" and "FASPs MUST
+   deduplicate content", and the spec is the source of truth, so dropping URIs not on the
+   registration's host would break conforming servers. Each URI is fetched from its own origin
+   and judged there. The count of foreign URIs is logged at info with the registration id and
+   host (the URIs at debug), so abuse stays visible. The amplification risk C1 describes is
+   bounded by row 18 (hard queue ceiling for announces) and row 20 (global outbound
+   semaphore), not by a host filter.
 4. **C4 admin API:** admin and crawl routes get their own `admin_listen` address, which
    defaults to `127.0.0.1:8081`, and are never served on the public listener. The crawler will
    be a dedicated one that runs on the same machine or connects through it. Nothing is
@@ -69,13 +76,13 @@ If PR 0 isn't merged quickly, all fix PRs stack on `audit/2026-11-19` instead.
 | 12 | B1, F7 | `.no_proxy()` in `client_builder`; warn at start-up when `allow_private_addresses` or `allow_http` is on | main | |
 | 13 | B2 | Strip one trailing dot in `host_key` and `uri_host_key` | main | |
 | 14 | B5 | FASP client: no redirects, or only same-origin https | main | |
-| 15 | C1, C2 | Drop announced URIs not on the registration's host; dedupe `object_uris` in `clean_uris` | main | |
+| 15 | C1, C2 | Dedupe `object_uris` in `clean_uris`; count and log announced URIs not on the registration's host (host filter dropped per the spec, decision 3) | main | ✓ |
 | **Remote DoS** |||||
 | 16 | E1, E3 | Cap `q` length and query key count; dedupe special keys with a `HashSet`; cap `tag` in `parse_post`; tighten E3's test | main | |
 | 17 | E2 | Truncate `preferredUsername` and `acct`; cap username tokens | main | |
-| 18 | C3, E5 | Hard queue ceiling for announces; inbox fetches get their own reason and share of the cap | 5 | |
+| 18 | C3, E5 | Hard queue ceiling for announces; inbox fetches get their own reason and share of the cap. This also bounds C1: announces may name any host (decision 3) | 5 | |
 | 19 | B3, E6 | Bound `Fetcher::hosts` (LRU or TTL); persist only hosts we have a reason to keep, in one transaction | 13 | |
-| 20 | A6/B4/E7 (a) | Global outbound semaphore, separate pool for inbox key fetches, per-request deadline across hops | 19 | |
+| 20 | A6/B4/E7 (a) | Global outbound semaphore, separate pool for inbox key fetches, per-request deadline across hops. Also caps fetching driven by announces naming many hosts (C1, decision 3) | 19 | |
 | 21 | A6/B4/E7 (b), E8 | Server header-read timeout, `TimeoutLayer`, concurrency limit; inbox `Content-Length` check before buffering; bound inbox spawns and answer 503 when full | main | |
 | 22 | A6/B4/E7 (c) | Cheap signature checks before any key fetch; refetch an evicted key at most once per N minutes | 2 | |
 | 23 | E10 | Cap robots rule count and pattern length, or a linear-time matcher | main | |
