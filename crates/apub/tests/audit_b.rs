@@ -34,7 +34,6 @@ fn config() -> FetcherConfig {
 /// per-host concurrency, pacing and backoff, so a stranger can double the rate we send to a
 /// host, and keep hitting one that is backing off.
 #[test]
-#[ignore = "AUDIT: B2 - fails until fixed"]
 fn a_trailing_dot_does_not_make_a_new_host() {
     assert_eq!(
         uri_host_key("https://victim.example./users/a"),

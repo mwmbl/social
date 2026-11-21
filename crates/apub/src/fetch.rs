@@ -385,9 +385,9 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// The key per-host limits are kept under for `uri`: lowercase `host` or `host:port`. `None`
-/// when `uri` does not parse or has no host. Callers that pace fetches per host use this so
-/// they group URIs exactly as the fetcher does.
+/// The key per-host limits are kept under for `uri`: lowercase `host` or `host:port`, without
+/// a trailing dot. `None` when `uri` does not parse or has no host. Callers that pace fetches
+/// per host use this so they group URIs exactly as the fetcher does.
 #[must_use]
 pub fn uri_host_key(uri: &str) -> Option<String> {
     let url = Url::parse(uri).ok()?;
@@ -395,9 +395,13 @@ pub fn uri_host_key(uri: &str) -> Option<String> {
     Some(host_key(&url))
 }
 
-/// `host` or `host:port`, lowercase.
+/// `host` or `host:port`, lowercase. One trailing dot is stripped: `victim.example.` is the
+/// same DNS name as `victim.example` (the root label), so it must share the same concurrency,
+/// pacing and backoff (audit B2). Only one is stripped, so `victim.example..` stays a
+/// different key; DNS does not resolve it as `victim.example`.
 fn host_key(url: &Url) -> String {
-    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let host = url.host_str().unwrap_or_default();
+    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
     match url.port() {
         Some(port) => format!("{host}:{port}"),
         None => host,
@@ -1139,6 +1143,37 @@ mod tests {
         assert_eq!(key("https://a.example:443/x").as_deref(), Some("a.example"));
         assert_eq!(key("not a uri"), None);
         assert_eq!(key("mailto:a@b.example"), None);
+    }
+
+    #[test]
+    fn a_trailing_dot_is_the_same_host() {
+        let key = |uri| uri_host_key(uri);
+        assert_eq!(
+            key("https://example.com./x").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(key("https://example.com/x").as_deref(), Some("example.com"));
+        assert_eq!(
+            key("https://Example.COM./x").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            key("http://example.com.:8080/x").as_deref(),
+            Some("example.com:8080")
+        );
+        assert_eq!(
+            key("https://example.com.:443/x").as_deref(),
+            Some("example.com")
+        );
+        // Only one dot is stripped: `example.com..` is not `example.com`.
+        assert_eq!(
+            key("https://example.com../x").as_deref(),
+            Some("example.com.")
+        );
+        // A redirect from one form to the other stays on the same host.
+        let a = Url::parse("https://example.com./a").ok();
+        let b = Url::parse("https://example.com/b").ok();
+        assert_eq!(a.as_ref().map(host_key), b.as_ref().map(host_key));
     }
 
     #[test]

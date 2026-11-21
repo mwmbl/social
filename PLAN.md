@@ -577,7 +577,8 @@ removes it.
    - The worker reads up to 4 due candidates per free slot (at most 256) and passes over,
      leaving queued, any whose host already has the fetcher's `per_host_concurrency` in
      flight, so one host's items never fill the worker's slots waiting on the fetcher. Host
-     is `apub::fetch::uri_host_key` (lowercase `host[:port]`, as the fetcher keys hosts);
+     is `apub::fetch::uri_host_key` (lowercase `host[:port]` with one trailing dot stripped,
+     as the fetcher keys hosts, so `h.example.` and `h.example` share limits and backoff);
      a URI without one is started as before.
    - Revalidations to one host start at most once per `revalidate_interval_per_host_ms`
      (default 1000). The worker keeps an in-memory `host -> next start, next free slot` map.
