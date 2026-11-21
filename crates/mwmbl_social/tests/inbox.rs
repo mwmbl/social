@@ -895,7 +895,6 @@ async fn settle() {
 }
 
 #[tokio::test]
-#[ignore = "AUDIT: A1 - fails until fixed"]
 async fn audit_a1_a_cached_key_signs_for_another_actor_on_its_origin() {
     let ours = Ours::start().await;
     let gts = FakeHost::start("gotosocial").await;
@@ -933,7 +932,6 @@ async fn audit_a1_a_cached_key_signs_for_another_actor_on_its_origin() {
 }
 
 #[tokio::test]
-#[ignore = "AUDIT: A2 - fails until fixed"]
 async fn audit_a2_a_key_document_the_actor_does_not_list_signs_for_it() {
     let ours = Ours::start().await;
     let gts = FakeHost::start("gotosocial").await;
@@ -965,6 +963,48 @@ async fn audit_a2_a_key_document_the_actor_does_not_list_signs_for_it() {
         "a key Bob's actor does not list recorded his opt-in (status {status})"
     );
     assert_eq!(status, 401);
+}
+
+/// A2 regression: a key in a document of its own (as GoToSocial serves them) signs for its
+/// owner when the owner's actor lists it with the same PEM, and not when the PEM differs.
+#[tokio::test]
+async fn a2_a_key_document_signs_only_when_its_owner_lists_the_same_key() {
+    let ours = Ours::start().await;
+    let gts = FakeHost::start("gotosocial").await;
+    ours.introduce(&gts).await;
+    for (name, listed_pem, accepted) in [
+        ("bob", public_pem(KEY_A), true),
+        ("eve", public_pem(KEY_B), false),
+    ] {
+        let actor = gts.url(&format!("/users/{name}"));
+        let key_id = format!("{actor}/main-key");
+        gts.actor(
+            &format!("/users/{name}"),
+            "Person",
+            KEY_A,
+            &json!({"publicKey": [{"id": key_id, "owner": actor, "publicKeyPem": listed_pem}]}),
+        );
+        gts.set(
+            &format!("/users/{name}/main-key"),
+            json!({"id": key_id, "owner": actor, "publicKeyPem": public_pem(KEY_A)}),
+        );
+        let follow = json!({"id": format!("{actor}/follows/1"), "type": "Follow",
+            "actor": actor, "object": ours.actor()});
+        let body = serde_json::to_vec(&follow).unwrap();
+        // Twice: the second is answered from the cache.
+        for _ in 0..2 {
+            let status = ours
+                .post_signed("/inbox", &body, &key_id, KEY_A, SignatureScheme::Rfc9421)
+                .await;
+            assert_eq!(status, if accepted { 202 } else { 401 }, "{name}");
+        }
+        settle().await;
+        assert_eq!(
+            ours.store().is_follow_optin(&actor).unwrap(),
+            accepted,
+            "{name}"
+        );
+    }
 }
 
 /// Bob, whom we follow and who accepted, with a post indexed for each word in `words`

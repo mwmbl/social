@@ -37,7 +37,7 @@ mod tombstones;
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 pub use enums::{
     BackfillState, Category, FetchKind, FetchReason, FollowState, RegistrationStatus,
@@ -102,6 +102,15 @@ impl Store {
         Ok(store)
     }
 
+    /// Begins a transaction that takes the write lock at once (`BEGIN IMMEDIATE`). Every
+    /// transaction here reads and then writes. A deferred one starts as a reader, and if another
+    /// connection commits before it writes, SQLite can't upgrade it and returns "database is
+    /// locked" at once, without waiting out the busy timeout. Taking the lock first makes it
+    /// wait like any other write.
+    fn write_transaction(&self) -> rusqlite::Result<Transaction<'_>> {
+        Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+    }
+
     fn migrate(&self, name: &str) -> Result<(), StoreError> {
         let found = self.schema_version()?;
         if found > SCHEMA_VERSION {
@@ -112,7 +121,7 @@ impl Store {
         }
         for (i, sql) in schema::MIGRATIONS.iter().enumerate().skip(found) {
             let op = format!("migration {} on {name}", i + 1);
-            let tx = self.conn.unchecked_transaction().map_err(ctx(op.clone()))?;
+            let tx = self.write_transaction().map_err(ctx(op.clone()))?;
             tx.execute_batch(sql).map_err(ctx(op.clone()))?;
             let violations: i64 = tx
                 .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {

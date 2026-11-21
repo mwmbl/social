@@ -103,7 +103,7 @@ impl Store {
     /// Returns how many were moved.
     pub fn orphan_subscriptions(&self, registration_id: i64) -> Result<usize, StoreError> {
         let op = format!("orphan subscriptions of registration {registration_id}");
-        let tx = self.conn.unchecked_transaction().map_err(ctx(op.clone()))?;
+        let tx = self.write_transaction().map_err(ctx(op.clone()))?;
         tx.execute(
             "INSERT OR IGNORE INTO orphaned_subscriptions (registration_id, remote_id)
              SELECT registration_id, remote_id FROM subscriptions WHERE registration_id = ?1",

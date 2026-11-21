@@ -119,7 +119,7 @@ impl Store {
             "replace registration {old_id} for {} with a new one",
             new.base_url
         );
-        let tx = self.conn.unchecked_transaction().map_err(ctx(op.clone()))?;
+        let tx = self.write_transaction().map_err(ctx(op.clone()))?;
         let changed = tx
             .execute("DELETE FROM registrations WHERE id = ?1", [old_id])
             .map_err(ctx(op.clone()))?;

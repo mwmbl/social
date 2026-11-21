@@ -69,7 +69,7 @@ impl Store {
     /// the last finish becomes `now`, the page resets to 0 and the new sweep starts at `now`.
     pub fn finish_sweep(&self, index: &str, now: i64) -> Result<(), StoreError> {
         let op = format!("finish sweep of index {index}");
-        let tx = self.conn.unchecked_transaction().map_err(ctx(op.clone()))?;
+        let tx = self.write_transaction().map_err(ctx(op.clone()))?;
         tx.execute(
             "INSERT OR IGNORE INTO sweep_state (index_name, current_page, current_sweep_started_at)
              VALUES (?1, 0, ?2)",
