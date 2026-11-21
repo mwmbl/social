@@ -72,7 +72,7 @@ If PR 0 isn't merged quickly, all fix PRs stack on `audit/2026-11-19` instead.
 | 15 | C1, C2 | Drop announced URIs not on the registration's host; dedupe `object_uris` in `clean_uris` | main | |
 | **Remote DoS** |||||
 | 16 | E1, E3 | Cap `q` length and query key count; dedupe special keys with a `HashSet`; cap `tag` in `parse_post`; tighten E3's test | main | |
-| 17 | E2 | Truncate `preferredUsername` and `acct`; cap username tokens | main | |
+| 17 | E2 | Truncate `preferredUsername` and `acct`; cap username tokens | main | ✓ |
 | 18 | C3, E5 | Hard queue ceiling for announces; inbox fetches get their own reason and share of the cap | 5 | |
 | 19 | B3, E6 | Bound `Fetcher::hosts` (LRU or TTL); persist only hosts we have a reason to keep, in one transaction | 13 | |
 | 20 | A6/B4/E7 (a) | Global outbound semaphore, separate pool for inbox key fetches, per-request deadline across hops | 19 | |

@@ -1,4 +1,4 @@
-//! Audit E (2026-11-19): key counts a stranger controls. These fail until fixed.
+//! Audit E (2026-11-19): key counts a stranger controls.
 
 use social_index::{KeyScheme, Keyed, SocialAccount};
 
@@ -7,7 +7,6 @@ use social_index::{KeyScheme, Keyed, SocialAccount};
 /// hostile server's discoverable actor with a long hyphenated `preferredUsername` is written
 /// to thousands of pages, where its high claimed follower count evicts real accounts.
 #[test]
-#[ignore = "AUDIT: E2 - fails until fixed"]
 fn account_keys_are_bounded() {
     let user: String = (0..2_000).map(|i| format!("a{i}-")).collect();
     let account = SocialAccount {

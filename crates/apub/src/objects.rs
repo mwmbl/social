@@ -59,6 +59,7 @@ pub struct ParsedPublicKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedActor {
     pub uri: String,
+    /// At most [`MAX_USERNAME_CHARS`] characters.
     pub preferred_username: String,
     pub name: Option<String>,
     pub summary_text: Option<String>,
@@ -231,6 +232,13 @@ fn hashtags(tag: Option<&Value>) -> Vec<String> {
 // ---------------------------------------------------------------------------------------------
 // Actors
 
+/// Most characters of `preferredUsername` [`parse_actor`] keeps; the rest are cut, on a char
+/// boundary. Mastodon allows 30, Lemmy and Misskey 20, `GoToSocial` 64, so 64 cuts no real
+/// username. Without a cap, a hostile actor's long hyphenated username becomes thousands of
+/// index keys (audit E2). Cutting here means the stored `acct` already holds the cut name, so
+/// account keys stay a pure function of the stored record.
+pub const MAX_USERNAME_CHARS: usize = 64;
+
 /// Parses a `Person`, `Service`, `Group`, `Application` or `Organization`.
 pub fn parse_actor(value: &Value) -> Result<ParsedActor, ParseError> {
     let obj = as_object(value)?;
@@ -246,8 +254,11 @@ pub fn parse_actor(value: &Value) -> Result<ParsedActor, ParseError> {
         uri: uri.clone(),
         field,
     };
-    let preferred_username =
-        plain(obj, "preferredUsername").ok_or_else(|| missing("preferredUsername"))?;
+    let preferred_username: String = plain(obj, "preferredUsername")
+        .ok_or_else(|| missing("preferredUsername"))?
+        .chars()
+        .take(MAX_USERNAME_CHARS)
+        .collect();
     let inbox = obj
         .get("inbox")
         .and_then(link)

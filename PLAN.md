@@ -354,7 +354,10 @@ Tuple layouts, with required fields first and optional ones last so they can be 
   - `language`: BCP 47, from `contentMap` or the language field.
 - **`SocialAccount`** (`ITEM_FACTORY = "SocialAccount"`):
   `[uri, acct, display_name, summary, score, term, checked, languages?]`
-  - `acct`: `user@host`.
+  - `acct`: `user@host`. `parse_actor` cuts `preferredUsername` to 64 chars
+    (`MAX_USERNAME_CHARS`; Mastodon allows 30, `GoToSocial` 64), and the record cuts `acct` to
+    324 chars (`MAX_ACCT_CHARS`: username, `@`, a 253-char host and a `:port`). Both cut on
+    char boundaries, at parse time, so the stored `acct` is what keys are derived from.
   - `summary`: the bio as plain text, truncated.
   - `score`: from followers and activity.
   - `languages`: the posting languages we've observed, for `account_search`'s `language`
@@ -363,7 +366,11 @@ Tuple layouts, with required fields first and optional ones last so they can be 
 If a field turns out to be needed later, add it at the end as optional. Old pages still decode.
 
 Index keys for accounts include the username, the full `user@host` handle, the host, and the
-display-name tokens, so handle searches work.
+display-name tokens, so handle searches work. Only the first 8 username tokens
+(`MAX_USERNAME_TOKENS`), the first 8 host tokens (`MAX_HOST_TOKENS`) and the first
+`KeyConfig::special` handle keys count, so a hostile actor can't be written to thousands of
+pages (audit E2). These caps are part of the key scheme: the scheme id went to `social-v2` when
+they were added, so an index built before them is refused and must be rebuilt.
 
 **Every item is also indexed under its URI as a key**, written as the term `uri:<uri>`. That
 makes it findable by URI alone, which is what deletion needs.

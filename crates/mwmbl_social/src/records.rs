@@ -10,6 +10,11 @@ use social_index::{SocialAccount, SocialPost};
 pub const MAX_EXTRACT_CHARS: usize = 300;
 /// Longest title we store, in characters.
 pub const MAX_TITLE_CHARS: usize = 200;
+/// Longest `acct` we store, in characters: a username of up to
+/// [`apub::objects::MAX_USERNAME_CHARS`], the `@`, and a host of up to 253 chars (the DNS
+/// limit) plus a `:port` of up to 6. `parse_actor` already keeps `acct` within this; the cut
+/// here bounds the stored record however the actor was built (audit E2).
+pub const MAX_ACCT_CHARS: usize = apub::objects::MAX_USERNAME_CHARS + 1 + 253 + 6;
 
 /// The epoch that recency factors are measured from (2025-01-01T00:00:00Z).
 const RECENCY_EPOCH: i64 = 1_735_689_600;
@@ -118,7 +123,7 @@ pub fn account_record(
 ) -> SocialAccount {
     SocialAccount {
         uri: actor.uri.clone(),
-        acct: actor.acct.clone(),
+        acct: actor.acct.chars().take(MAX_ACCT_CHARS).collect(),
         display_name: truncate_text(actor.name.as_deref().unwrap_or(""), MAX_TITLE_CHARS),
         summary: truncate_text(
             actor.summary_text.as_deref().unwrap_or(""),
@@ -203,6 +208,39 @@ pub(crate) mod tests {
         let mut ancient = base.clone();
         ancient.published = Some(0);
         assert!(score(&ancient).is_finite() && score(&ancient) > 0.0);
+    }
+
+    fn actor(acct: &str) -> ParsedActor {
+        ParsedActor {
+            uri: "https://h.example/users/a".into(),
+            preferred_username: "a".into(),
+            name: Some("Alice".into()),
+            summary_text: Some("Bio".into()),
+            host: "h.example".into(),
+            acct: acct.into(),
+            kind: "Person".into(),
+            published: None,
+            discoverable: true,
+            indexable: true,
+            followers: Some(100),
+            following: None,
+            statuses: Some(10),
+            public_key: None,
+            inbox: "https://h.example/users/a/inbox".into(),
+            shared_inbox: None,
+        }
+    }
+
+    #[test]
+    fn account_records_cut_acct_to_max_chars() {
+        let at = "a".repeat(MAX_ACCT_CHARS);
+        assert_eq!(account_record(&actor(&at), None, 5).acct, at);
+        let over = "a".repeat(MAX_ACCT_CHARS + 1);
+        assert_eq!(account_record(&actor(&over), None, 5).acct, at);
+        // Counted in chars, and a multi-byte char at the boundary is never split.
+        let wide = format!("{}ü€", "a".repeat(MAX_ACCT_CHARS - 1));
+        let cut = account_record(&actor(&wide), None, 5).acct;
+        assert_eq!(cut, format!("{}ü", "a".repeat(MAX_ACCT_CHARS - 1)));
     }
 
     #[test]
