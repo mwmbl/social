@@ -12,6 +12,7 @@ use store::{NewRegistration, Registration, RegistrationStatus};
 use url::Url;
 
 use crate::StoreAccess;
+use crate::client::redirect_reason;
 use crate::error::RegistrationError;
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -94,6 +95,12 @@ async fn get_json(http: &reqwest::Client, url: &Url) -> Result<Value, Registrati
             url: url.to_string(),
             source,
         })?;
+    if let Some(reason) = redirect_reason(&response) {
+        return Err(RegistrationError::BadResponse {
+            url: url.to_string(),
+            reason,
+        });
+    }
     let status = response.status();
     if !status.is_success() {
         return Err(RegistrationError::Status {
@@ -317,6 +324,12 @@ impl Exchange<'_> {
                 url: url.to_string(),
                 source,
             })?;
+        if let Some(reason) = redirect_reason(&response) {
+            return Err(RegistrationError::BadResponse {
+                url: url.to_string(),
+                reason,
+            });
+        }
         let status = response.status();
         // The spec says 201, but Mastodon 4.7.5 answers 200 (its controller renders with the
         // default status), so any 2xx with a valid body is a registration.

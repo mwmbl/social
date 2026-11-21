@@ -224,6 +224,10 @@ policy (`is_public`, table-tested):
   uses the system resolver and drops non-public addresses, failing when none remain. The check
   is on the addresses the connection is made to, so DNS rebinding can't get between a check and
   the connect. Redirects to non-public IP literals are refused.
+- The client for our calls to servers' FASP APIs and for registration
+  (`fasp::client::http_client_builder`) follows no redirects at all: the FASP spec never asks
+  for one, and following would forward our signed request to another origin, even over
+  `http://`. A 3xx is an error naming the URL and the `Location` it pointed at.
 - `reqwest` connects to an IP-literal host without resolving it, so `apub::net::check_url`
   refuses those where URLs are accepted: `Fetcher` (every fetch and delivery), registration
   (the server URL, `--fasp-base-url` and the discovered FASP base URL, checked before
