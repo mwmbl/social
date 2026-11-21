@@ -31,6 +31,33 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
 
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
+/// The start of the HTTP client for our calls to servers' FASP APIs and for registration:
+/// [`apub::net::client_builder`] with redirects switched off (audit B5). The FASP spec never
+/// asks a client to follow one, and following would forward our signed request, signature
+/// headers included, to wherever the server points, even over `http://`. A redirect is an error
+/// that names the URL and where it pointed ([`ClientError::BadResponse`],
+/// [`crate::RegistrationError::BadResponse`]).
+pub fn http_client_builder(allow_private: bool) -> reqwest::ClientBuilder {
+    apub::net::client_builder(allow_private).redirect(reqwest::redirect::Policy::none())
+}
+
+/// The reason given for a redirect response, which is never followed: see
+/// [`http_client_builder`].
+pub(crate) fn redirect_reason(response: &reqwest::Response) -> Option<String> {
+    if !response.status().is_redirection() {
+        return None;
+    }
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("(no location)");
+    Some(format!(
+        "answered HTTP {} redirecting to `{location}`, which is not followed",
+        response.status().as_u16()
+    ))
+}
+
 /// The verified response to one request.
 struct Verified {
     status: u16,
@@ -235,6 +262,9 @@ impl<S: StoreAccess> FaspClient<S> {
                 path: path.to_owned(),
                 retry_after,
             });
+        }
+        if let Some(reason) = redirect_reason(&response) {
+            return Err(host_path(reason));
         }
         let headers = response.headers().clone();
         let mut body = Vec::new();

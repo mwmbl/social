@@ -495,9 +495,10 @@ fn follow_settings(config: &Config) -> anyhow::Result<FollowSettings> {
 }
 
 /// The HTTP client for our own calls to servers' FASP APIs and registration. Like every
-/// outbound client, it refuses non-public addresses unless `allow_private_addresses`.
+/// outbound client, it refuses non-public addresses unless `allow_private_addresses`, and it
+/// follows no redirects (audit B5).
 fn http_client(config: &Config, base_url: &str) -> anyhow::Result<reqwest::Client> {
-    apub::net::client_builder(config.allow_private_addresses)
+    fasp::client::http_client_builder(config.allow_private_addresses)
         .user_agent(user_agent(base_url))
         .timeout(Duration::from_secs(30))
         .build()
