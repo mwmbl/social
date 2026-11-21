@@ -61,3 +61,35 @@ pub fn now_millis() -> i64 {
         .and_then(|d| i64::try_from(d.as_millis()).ok())
         .unwrap_or(0)
 }
+
+static LAST_STAMP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// A time in Unix milliseconds that is strictly later than every earlier stamp in this process,
+/// even within one millisecond. Fetch starts and tombstones both take one, so the writer can
+/// tell whether a tombstone was made before or after the fetch an index decision came from.
+#[must_use]
+pub fn stamp_millis() -> i64 {
+    use std::sync::atomic::Ordering;
+    let now = now_millis();
+    let mut last = LAST_STAMP.load(Ordering::SeqCst);
+    loop {
+        let next = now.max(last.saturating_add(1));
+        match LAST_STAMP.compare_exchange_weak(last, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return next,
+            Err(actual) => last = actual,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn stamps_are_strictly_increasing() {
+        let mut last = super::stamp_millis();
+        for _ in 0..1000 {
+            let next = super::stamp_millis();
+            assert!(next > last);
+            last = next;
+        }
+    }
+}

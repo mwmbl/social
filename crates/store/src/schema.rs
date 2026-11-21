@@ -193,4 +193,11 @@ CREATE INDEX registrations_fasp_id ON registrations(fasp_id);
 -- fails only the generation it read, so a request that arrives mid-fetch (audit D1) stays.
 ALTER TABLE fetch_queue ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+-- When a tombstone was made, in milliseconds from the clock fetches are stamped with. The
+-- writer refuses an index decision from a fetch that started before the tombstone (audit D2,
+-- D6). Seconds are too coarse: a post is often deleted within a second of being fetched.
+ALTER TABLE tombstones ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0;
+UPDATE tombstones SET created_at_ms = created_at * 1000;
+",
 ];

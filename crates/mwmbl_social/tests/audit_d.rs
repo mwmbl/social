@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use apub::consent::ConsentContext;
 use common::{PUBLIC, TestEnv};
-use mwmbl_social::decide::{Action, Author, Fetched, decide_post};
-use mwmbl_social::now_secs;
+use mwmbl_social::decide::{Action, Author, Clock, Fetched, decide_post};
 use mwmbl_social::sweep::{SweepConfig, step};
 use mwmbl_social::writer::IndexName;
+use mwmbl_social::{now_secs, stamp_millis};
 use serde_json::json;
 use store::{FetchKind, FetchReason, NewFetch};
 
@@ -86,7 +86,6 @@ async fn a_delete_announced_while_the_create_is_in_flight_is_not_lost() {
 /// from a fetch before the delete, applied after it, clears the object tombstone and indexes
 /// the deleted post again.
 #[tokio::test]
-#[ignore = "AUDIT: D2 - fails until fixed"]
 async fn an_index_decision_from_before_an_inbox_delete_does_not_resurrect_the_post() {
     let env = TestEnv::new().await;
     let uri = env.fake.url("/notes/public");
@@ -120,6 +119,67 @@ async fn an_index_decision_from_before_an_inbox_delete_does_not_resurrect_the_po
     );
 }
 
+/// D6: an author document fetched (or cached) before an opt-out, applied after it, must not
+/// clear the author tombstone or bring back the account that was removed. A decision from a
+/// fetch after the opt-out still does.
+#[tokio::test]
+async fn a_decision_from_before_an_opt_out_does_not_undo_it() {
+    let env = TestEnv::new().await;
+    let actor = env.fake.url("/users/alice");
+    let processed = env
+        .ingest("/users/alice", FetchKind::Actor, FetchReason::Announce)
+        .await;
+    let stale: Vec<Action> = processed
+        .actions
+        .into_iter()
+        .filter(|a| {
+            matches!(
+                a,
+                Action::IndexAccount { .. } | Action::ClearAuthorTombstone { .. }
+            )
+        })
+        .collect();
+    assert_eq!(stale.len(), 2, "{stale:?}");
+    assert!(!env.search_accounts("alice").is_empty());
+
+    // The account opts out and is removed while a post's decision, made from the cached
+    // document, is in flight.
+    env.handle
+        .apply(vec![
+            Action::RemoveAccount {
+                uri: actor.clone(),
+                record: None,
+                tombstone: true,
+            },
+            Action::AddAuthorTombstone {
+                actor_uri: actor.clone(),
+            },
+        ])
+        .await
+        .unwrap();
+    env.handle.apply(stale).await.unwrap();
+    assert!(env.search_accounts("alice").is_empty(), "account came back");
+    let kinds: Vec<_> = env
+        .store
+        .list_tombstones()
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.uri == actor)
+        .map(|t| t.kind)
+        .collect();
+    assert_eq!(kinds.len(), 2, "a stale decision cleared a tombstone");
+
+    // Opting back in later is a newer fetch, and wins.
+    env.handle
+        .apply(vec![Action::ClearAuthorTombstone {
+            actor_uri: actor.clone(),
+            fetched_at: stamp_millis(),
+        }])
+        .await
+        .unwrap();
+    assert_eq!(env.store.list_tombstones().unwrap().len(), 1);
+}
+
 /// D3: when a post's author document says `discoverable: false`, `decide_post` removes and
 /// tombstones whatever account that document's `id` names, without checking that the `id` is
 /// the post's `attributedTo` or on the post's origin. A host can make us remove any account
@@ -146,13 +206,12 @@ fn a_post_cannot_make_us_remove_an_account_on_another_host() {
             fetched: &forged,
             context: ConsentContext::NONE,
         }),
-        now_secs(),
+        Clock::at(now_secs()),
     );
     let touches_victim = actions.iter().any(|a| match a {
         Action::RemoveAccount { uri, .. } => uri == victim,
-        Action::AddAuthorTombstone { actor_uri } | Action::ClearAuthorTombstone { actor_uri } => {
-            actor_uri == victim
-        }
+        Action::AddAuthorTombstone { actor_uri }
+        | Action::ClearAuthorTombstone { actor_uri, .. } => actor_uri == victim,
         _ => false,
     });
     assert!(!touches_victim, "{actions:?}");

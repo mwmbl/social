@@ -511,7 +511,9 @@ fn http_client(config: &Config, base_url: &str) -> anyhow::Result<reqwest::Clien
 #[must_use]
 pub fn action_summary(action: &Action) -> Value {
     match action {
-        Action::IndexPost { record, replaces } => json!({
+        Action::IndexPost {
+            record, replaces, ..
+        } => json!({
             "action": "index_post", "uri": record.uri, "replaces_stored_record": replaces.is_some(),
         }),
         Action::RemovePost {
@@ -522,7 +524,9 @@ pub fn action_summary(action: &Action) -> Value {
             "action": "remove_post", "uri": uri, "had_stored_record": record.is_some(),
             "tombstone": tombstone,
         }),
-        Action::IndexAccount { record, replaces } => json!({
+        Action::IndexAccount {
+            record, replaces, ..
+        } => json!({
             "action": "index_account", "uri": record.uri, "replaces_stored_record": replaces.is_some(),
         }),
         Action::RemoveAccount {
@@ -536,7 +540,7 @@ pub fn action_summary(action: &Action) -> Value {
         Action::AddAuthorTombstone { actor_uri } => {
             json!({ "action": "add_author_tombstone", "actor_uri": actor_uri })
         }
-        Action::ClearAuthorTombstone { actor_uri } => {
+        Action::ClearAuthorTombstone { actor_uri, .. } => {
             json!({ "action": "clear_author_tombstone", "actor_uri": actor_uri })
         }
         Action::Retry { reason } => json!({ "action": "retry", "reason": reason }),
