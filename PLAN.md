@@ -818,9 +818,11 @@ follow opt-in, admin follows, outbox backfill and crawl submissions with robots.
   boosts are ignored. `Delete` from any verified actor of an object on its origin (or from a
   followed `Group`) removes it; of the actor itself removes the account. `Remove` from a
   followed `Group` with `target` the group removes the object (moderators-collection targets
-  are ignored). `Block` with `removeData: true` from a followed `Group` or the blocked user's
-  own instance adds an author tombstone. `Undo{Delete|Remove}` from a followed actor queues the
-  object again. The rest is ignored.
+  are ignored). `Block` with `removeData: true` from a followed `Group` adds an author
+  tombstone. Any other `Block` is ignored, an instance ban included: it is signed by an admin
+  `Person`, who can't be told from any other user on that origin without trusting a fetched
+  admin list, so the banned user's posts go when revalidation finds them gone (audit A4).
+  `Undo{Delete|Remove}` from a followed actor queues the object again. The rest is ignored.
 - A sender's type (is it a `Group`) and inbox come from the key fetch when the key document is
   the actor, else from a fetch of the actor, cached for an hour. Only an inbox on the actor's
   origin is delivered to.

@@ -1025,7 +1025,6 @@ async fn audit_a3_anyone_on_an_origin_can_delete_anothers_post() {
 }
 
 #[tokio::test]
-#[ignore = "AUDIT: A4 - fails until fixed"]
 async fn audit_a4_anyone_on_an_origin_can_tombstone_another_author() {
     let ours = Ours::start().await;
     let gts = FakeHost::start("gotosocial").await;

@@ -21,8 +21,9 @@
 //!   delete): remove it and tombstone it. Of the actor itself: remove the account.
 //! - `Remove` from a followed `Group` whose `target` is the group (a moderator removal):
 //!   remove the object.
-//! - `Block` with `removeData` from a followed `Group` or the blocked user's own instance:
-//!   tombstone the author.
+//! - `Block` with `removeData` from a followed `Group`: tombstone the author. Any other
+//!   `Block`, an instance ban included, is ignored, since its admin sender can't be told from
+//!   an ordinary user on that origin.
 //! - `Undo{Delete}`/`Undo{Remove}` from an actor we follow (a restore): fetch the object again;
 //!   the fetch decides.
 //! - Anything else is ignored, and so is anything our own actor sends.
@@ -256,11 +257,15 @@ fn dispatch(our_actor: &str, sender: &Sender<'_>, activity: &Value, wrapped: boo
                 uri: object_id.to_owned(),
             }]
         }
+        // Only a followed `Group`'s ban (a moderator's, relayed by the community) counts. An
+        // instance ban comes signed by an admin `Person`, which we can't tell from any other
+        // user on that origin without trusting a fetched admin list, so it is ignored: the
+        // posts go when revalidation finds them gone (audit finding A4).
         "Block"
             if activity.get("removeData") == Some(&Value::Bool(true))
                 && object_id != our_actor
-                && ((sender.is_group && sender.followed())
-                    || (!wrapped && same_origin(object_id, sender.actor))) =>
+                && sender.is_group
+                && sender.followed() =>
         {
             vec![Effect::AddAuthorTombstone {
                 actor_uri: object_id.to_owned(),
@@ -728,13 +733,44 @@ mod tests {
                 vec![],
             ),
             (
-                "instance ban that removes data",
+                "instance ban that removes data (the admin can't be told from any user)",
                 stranger("https://lemmy.example/u/admin"),
                 json!({"type": "Block", "actor": "https://lemmy.example/u/admin", "object": LEMMY_USER,
                        "target": "https://lemmy.example/", "removeData": true}),
+                vec![],
+            ),
+            (
+                "a user blocking a neighbour on the same instance with removeData",
+                stranger("https://lemmy.example/u/eve"),
+                json!({"type": "Block", "actor": "https://lemmy.example/u/eve", "object": LEMMY_USER,
+                       "removeData": true}),
+                vec![],
+            ),
+            (
+                "a followed person blocking a neighbour with removeData",
+                followed("https://lemmy.example/u/eve"),
+                json!({"type": "Block", "actor": "https://lemmy.example/u/eve", "object": LEMMY_USER,
+                       "removeData": true}),
+                vec![],
+            ),
+            (
+                "a ban that removes data, sent by the followed community directly",
+                community(),
+                json!({"type": "Block", "actor": COMMUNITY, "object": LEMMY_USER,
+                       "target": COMMUNITY, "removeData": true}),
                 vec![Effect::AddAuthorTombstone {
                     actor_uri: LEMMY_USER.into(),
                 }],
+            ),
+            (
+                "a ban by a community we don't follow",
+                Sender {
+                    our_follow: None,
+                    ..community()
+                },
+                json!({"type": "Block", "actor": COMMUNITY, "object": LEMMY_USER,
+                       "target": COMMUNITY, "removeData": true}),
+                vec![],
             ),
             (
                 "a user blocking someone on another instance",
