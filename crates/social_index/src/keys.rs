@@ -9,6 +9,14 @@ use tokenize::{KeyConfig, TOKENIZER_VERSION, field_keys, special_keys, tokenize}
 
 use crate::item::{SocialAccount, SocialPost};
 
+/// Most username tokens an account is keyed under. Each key is a page rewrite on the single
+/// writer, so a hostile actor's hyphenated username must not become hundreds of keys (audit
+/// E2). Mastodon usernames are one token; 8 covers any real `the-quick-brown` style name.
+pub const MAX_USERNAME_TOKENS: usize = 8;
+/// Most host tokens an account is keyed under. Hosts are chosen by whoever runs them, and a
+/// 253-char name of hyphenated labels is over 100 tokens; real hosts are one to a few.
+pub const MAX_HOST_TOKENS: usize = 8;
+
 /// The key every item is also stored under, so it can be found by URI alone.
 #[must_use]
 pub fn uri_key(uri: &str) -> String {
@@ -32,7 +40,7 @@ impl KeyScheme {
             special,
         } = self.config;
         format!(
-            "social-v1;tokenize-v{TOKENIZER_VERSION};first={first_tokens};bigrams={bigrams};special={special}"
+            "social-v2;tokenize-v{TOKENIZER_VERSION};first={first_tokens};bigrams={bigrams};special={special}"
         )
     }
 }
@@ -120,14 +128,24 @@ impl Keyed for SocialAccount {
         }
     }
 
-    /// The username, the host, the `@user@host` handle, then display-name and summary keys.
-    /// Handle searches work because `query_keys("@user@host")` asks for the same handle key.
+    /// The username (first [`MAX_USERNAME_TOKENS`] tokens), the host (first
+    /// [`MAX_HOST_TOKENS`]), the `@user@host` handle (first `special` keys), then display-name
+    /// and summary keys. Handle searches work because `query_keys("@user@host")` asks for the
+    /// same handle key.
     fn keys(&self, scheme: &KeyScheme) -> Vec<String> {
         let mut keys = Vec::new();
         let (user, host) = self.acct.split_once('@').unwrap_or((&self.acct, ""));
-        push_unique(&mut keys, tokenize(user));
-        push_unique(&mut keys, tokenize(host));
-        push_unique(&mut keys, special_keys(&format!("@{}", self.acct)));
+        push_unique(
+            &mut keys,
+            tokenize(user).into_iter().take(MAX_USERNAME_TOKENS),
+        );
+        push_unique(&mut keys, tokenize(host).into_iter().take(MAX_HOST_TOKENS));
+        push_unique(
+            &mut keys,
+            special_keys(&format!("@{}", self.acct))
+                .into_iter()
+                .take(scheme.config.special),
+        );
         push_unique(&mut keys, field_keys(&self.display_name, &scheme.config));
         push_unique(&mut keys, field_keys(&self.summary, &scheme.config));
         push_unique(&mut keys, [uri_key(&self.uri)]);
@@ -192,6 +210,52 @@ mod tests {
         q.checked = 5;
         q.published = 6;
         assert_eq!(p.keys(&KeyScheme::default()), q.keys(&KeyScheme::default()));
+    }
+
+    /// `count` hyphen-joined tokens, `{prefix}0-{prefix}1-...`.
+    fn hyphenated(prefix: &str, count: usize) -> String {
+        (0..count)
+            .map(|i| format!("{prefix}{i}"))
+            .collect::<Vec<_>>()
+            .join("-")
+    }
+
+    fn account_keys(acct: &str) -> Vec<String> {
+        account("https://h.example/users/x", acct, "x").keys(&KeyScheme::default())
+    }
+
+    #[test]
+    fn username_tokens_are_capped() {
+        let has = |keys: &[String], key: String| keys.contains(&key);
+        let at = account_keys(&format!(
+            "{}@h.example",
+            hyphenated("u", MAX_USERNAME_TOKENS)
+        ));
+        assert!(has(&at, format!("u{}", MAX_USERNAME_TOKENS - 1)), "{at:?}");
+        let n = MAX_USERNAME_TOKENS + 1;
+        let over = account_keys(&format!("{}@h.example", hyphenated("u", n)));
+        assert!(
+            has(&over, format!("u{}", MAX_USERNAME_TOKENS - 1)),
+            "{over:?}"
+        );
+        assert!(!has(&over, format!("u{MAX_USERNAME_TOKENS}")), "{over:?}");
+        // Multi-byte tokens count as one token each.
+        let over = account_keys(&format!("{}@h.example", hyphenated("ü", n)));
+        assert!(
+            has(&over, format!("ü{}", MAX_USERNAME_TOKENS - 1)),
+            "{over:?}"
+        );
+        assert!(!has(&over, format!("ü{MAX_USERNAME_TOKENS}")), "{over:?}");
+    }
+
+    #[test]
+    fn host_tokens_are_capped() {
+        let has = |keys: &[String], key: String| keys.contains(&key);
+        let at = account_keys(&format!("a@{}", hyphenated("h", MAX_HOST_TOKENS)));
+        assert!(has(&at, format!("h{}", MAX_HOST_TOKENS - 1)), "{at:?}");
+        let over = account_keys(&format!("a@{}", hyphenated("h", MAX_HOST_TOKENS + 1)));
+        assert!(has(&over, format!("h{}", MAX_HOST_TOKENS - 1)), "{over:?}");
+        assert!(!has(&over, format!("h{MAX_HOST_TOKENS}")), "{over:?}");
     }
 
     #[test]

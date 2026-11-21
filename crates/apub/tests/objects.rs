@@ -247,6 +247,35 @@ fn other_servers_actors() {
     assert!(!p.preferred_username.is_empty());
 }
 
+fn actor_named(username: &str) -> Value {
+    json!({
+        "id": "https://h.example/users/x", "type": "Person",
+        "preferredUsername": username, "inbox": "https://h.example/inbox"
+    })
+}
+
+#[test]
+fn preferred_username_is_cut_to_max_chars() {
+    use apub::objects::MAX_USERNAME_CHARS as MAX;
+    // At the cap: kept whole.
+    let at = "a".repeat(MAX);
+    let a = parse_actor(&actor_named(&at)).unwrap();
+    assert_eq!(a.preferred_username, at);
+    assert_eq!(a.acct, format!("{at}@h.example"));
+    // Over the cap: cut, and `acct` is built from the cut name.
+    let over = "a".repeat(MAX + 1);
+    let a = parse_actor(&actor_named(&over)).unwrap();
+    assert_eq!(a.preferred_username, at);
+    assert_eq!(a.acct, format!("{at}@h.example"));
+    // Multi-byte chars at the boundary are counted as chars and never split.
+    let wide = format!("{}é漢", "a".repeat(MAX - 1));
+    let a = parse_actor(&actor_named(&wide)).unwrap();
+    assert_eq!(a.preferred_username, format!("{}é", "a".repeat(MAX - 1)));
+    let emoji = "🦀".repeat(MAX + 5);
+    let a = parse_actor(&actor_named(&emoji)).unwrap();
+    assert_eq!(a.preferred_username, "🦀".repeat(MAX));
+}
+
 #[test]
 fn actor_with_counts_and_flags_defaults() {
     let v = json!({
