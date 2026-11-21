@@ -6,10 +6,12 @@ mod common;
 use std::time::Duration;
 
 use apub::consent::ConsentContext;
+use apub::fetch::uri_host_key;
 use common::{PUBLIC, TestEnv};
 use mwmbl_social::decide::{Action, Author, Fetched, decide_post};
 use mwmbl_social::now_secs;
 use mwmbl_social::sweep::{SweepConfig, step};
+use mwmbl_social::worker::FAILED_REVALIDATION_PASSES_LIMIT;
 use mwmbl_social::writer::IndexName;
 use serde_json::json;
 use store::{FetchKind, FetchReason, NewFetch};
@@ -202,7 +204,6 @@ async fn an_unfollow_withdraws_a_flagless_account_even_if_its_refetch_fails() {
 /// server shut down, or one that now errors for us) is re-queued every sweep pass, given up on,
 /// and served forever, though its consent can no longer be confirmed.
 #[tokio::test]
-#[ignore = "AUDIT: D5 - fails until fixed"]
 async fn content_whose_origin_never_answers_again_is_eventually_removed() {
     let mut env = TestEnv::with_attempts(1).await;
     env.ingest("/notes/public", FetchKind::Object, FetchReason::Announce)
@@ -217,5 +218,58 @@ async fn content_whose_origin_never_answers_again_is_eventually_removed() {
     assert!(
         env.search_posts("garlic").is_empty(),
         "five failed revalidation passes in a row, and the post is still served"
+    );
+}
+
+/// D5: one failed pass per sweep is counted for the host, however many of its records fail;
+/// content stays until the limit, and a revalidation that succeeds resets the count.
+#[tokio::test]
+async fn failed_revalidation_passes_are_counted_per_host_and_reset_by_a_success() {
+    let mut env = TestEnv::with_short_host_backoff(1).await;
+    let host = uri_host_key(&env.fake.url("/")).unwrap();
+    env.ingest("/notes/public", FetchKind::Object, FetchReason::Announce)
+        .await;
+    assert_eq!(env.search_accounts("alice").len(), 1);
+    env.fake.set_failing("/notes/public");
+    env.fake.set_failing("/users/alice");
+    for pass in 1..FAILED_REVALIDATION_PASSES_LIMIT {
+        sweep_everything(&mut env).await;
+        env.worker.drain(&mut env.store).await.unwrap();
+        // The post and its author both failed, but that is one pass.
+        assert_eq!(env.store.failed_revalidation_passes(&host).unwrap(), pass);
+        assert_eq!(
+            env.search_posts("garlic").len(),
+            1,
+            "removed after {pass} failed passes, before the limit"
+        );
+    }
+
+    // The server comes back: a revalidation succeeds and the count starts again.
+    env.fake.set_working("/notes/public");
+    env.fake.set_working("/users/alice");
+    // The fetcher's shortest backoff after a failure is a second.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    sweep_everything(&mut env).await;
+    env.worker.drain(&mut env.store).await.unwrap();
+    assert_eq!(env.store.failed_revalidation_passes(&host).unwrap(), 0);
+    assert_eq!(env.search_posts("garlic").len(), 1);
+
+    // Failing again, it takes the full limit of passes in a row to remove it.
+    env.fake.set_failing("/notes/public");
+    env.fake.set_failing("/users/alice");
+    for _ in 1..FAILED_REVALIDATION_PASSES_LIMIT {
+        sweep_everything(&mut env).await;
+        env.worker.drain(&mut env.store).await.unwrap();
+    }
+    assert_eq!(env.search_posts("garlic").len(), 1);
+    sweep_everything(&mut env).await;
+    env.worker.drain(&mut env.store).await.unwrap();
+    assert!(
+        env.search_posts("garlic").is_empty(),
+        "the post is still served"
+    );
+    assert!(
+        env.search_accounts("alice").is_empty(),
+        "the author is still served"
     );
 }

@@ -208,6 +208,56 @@ impl Store {
         Ok(())
     }
 
+    /// Counts a revalidation of `host` that gave up during sweep pass `pass`, and returns how
+    /// many passes in a row have had one. A pass counts once, however many of the host's
+    /// revalidations fail in it (audit D5).
+    pub fn record_failed_revalidation(&self, host: &str, pass: i64) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "INSERT INTO hosts (host, failed_revalidation_passes, failed_revalidation_pass)
+                 VALUES (?1, 1, ?2)
+                 ON CONFLICT (host) DO UPDATE SET
+                     failed_revalidation_passes = CASE
+                         WHEN hosts.failed_revalidation_pass IS NULL
+                             OR hosts.failed_revalidation_pass < excluded.failed_revalidation_pass
+                         THEN hosts.failed_revalidation_passes + 1
+                         ELSE hosts.failed_revalidation_passes END,
+                     failed_revalidation_pass = MAX(
+                         COALESCE(hosts.failed_revalidation_pass, 0),
+                         excluded.failed_revalidation_pass)
+                 RETURNING failed_revalidation_passes",
+                params![host, pass],
+                |r| r.get(0),
+            )
+            .map_err(ctx(format!("count a failed revalidation of host {host}")))
+    }
+
+    /// Resets the host's failed revalidation passes: a revalidation succeeded. A no-op for
+    /// unknown hosts and hosts with none.
+    pub fn clear_failed_revalidations(&self, host: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "UPDATE hosts SET failed_revalidation_passes = 0, failed_revalidation_pass = NULL
+                 WHERE host = ?1 AND failed_revalidation_pass IS NOT NULL",
+                [host],
+            )
+            .map_err(ctx(format!("clear failed revalidations of host {host}")))?;
+        Ok(())
+    }
+
+    /// How many sweep passes in a row have had a failed revalidation of `host`.
+    pub fn failed_revalidation_passes(&self, host: &str) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT failed_revalidation_passes FROM hosts WHERE host = ?1",
+                [host],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(Option::unwrap_or_default)
+            .map_err(ctx(format!("read failed revalidations of host {host}")))
+    }
+
     pub fn set_host_blocked(&self, host: &str, blocked: bool) -> Result<(), StoreError> {
         self.conn
             .execute(
@@ -265,6 +315,31 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn failed_revalidations_count_once_per_pass_and_clear() -> TestResult {
+        let s = Store::open_in_memory()?;
+        assert_eq!(s.failed_revalidation_passes("a.example")?, 0);
+        assert_eq!(s.record_failed_revalidation("a.example", 4)?, 1);
+        // More of the host's records failing in the same pass don't count again.
+        assert_eq!(s.record_failed_revalidation("a.example", 4)?, 1);
+        assert_eq!(s.record_failed_revalidation("a.example", 5)?, 2);
+        // A failure from an older pass, finishing late, doesn't move the pass back.
+        assert_eq!(s.record_failed_revalidation("a.example", 3)?, 2);
+        assert_eq!(s.record_failed_revalidation("a.example", 6)?, 3);
+        assert_eq!(s.failed_revalidation_passes("b.example")?, 0);
+        s.clear_failed_revalidations("a.example")?;
+        assert_eq!(s.failed_revalidation_passes("a.example")?, 0);
+        assert_eq!(s.record_failed_revalidation("a.example", 6)?, 1);
+        // Clearing leaves the host's other state alone.
+        s.set_backoff("a.example", 500)?;
+        s.clear_failed_revalidations("a.example")?;
+        assert_eq!(
+            s.host("a.example")?.ok_or("missing")?.backoff_until,
+            Some(500)
+        );
+        Ok(())
+    }
 
     #[test]
     fn host_state() -> TestResult {

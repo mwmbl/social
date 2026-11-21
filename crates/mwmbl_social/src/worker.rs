@@ -41,6 +41,11 @@ const BASE_RETRY_SECS: i64 = 60;
 pub const AUTHOR_CACHE_CAPACITY: usize = 10_000;
 pub const AUTHOR_CACHE_TTL_SECS: i64 = 3600;
 
+/// After this many sweep passes in a row in which a host's revalidations gave up on transient
+/// failures, its content is removed when a revalidation gives up: its consent can no longer be
+/// confirmed (audit D5). About 18 days at the default sweep.
+pub const FAILED_REVALIDATION_PASSES_LIMIT: i64 = 3;
+
 // ---------------------------------------------------------------------------------------------
 // Carried records
 
@@ -341,6 +346,8 @@ pub struct Worker {
     robots: RobotsSource,
     authors: Mutex<AuthorCache>,
     counters: Arc<FetchCounters>,
+    /// The worker's own connection, shared with `contexts` and `robots`.
+    store: Arc<Mutex<Store>>,
     config: WorkerConfig,
 }
 
@@ -426,6 +433,7 @@ impl Worker {
         let contexts = ContextSource::new(Arc::clone(&fetcher), store);
         Self {
             robots: RobotsSource::new(Arc::clone(&fetcher), contexts.store_handle()),
+            store: contexts.store_handle(),
             contexts,
             fetcher,
             writer,
@@ -572,19 +580,7 @@ impl Worker {
 
         let actions = if host_blocked(&self.writer.tombstones(), uri) {
             tracing::debug!(uri, "host is domain-blocked, not fetching");
-            match carried {
-                Some(Carried::Post(record)) => vec![Action::RemovePost {
-                    uri: uri.to_string(),
-                    record: Some(record),
-                    tombstone: false,
-                }],
-                Some(Carried::Account(record)) => vec![Action::RemoveAccount {
-                    uri: uri.to_string(),
-                    record: Some(record),
-                    tombstone: false,
-                }],
-                None => Vec::new(),
-            }
+            remove_carried_record(uri, carried)
         } else if item.reason == FetchReason::Crawl {
             match self.crawl_check(uri, now).await {
                 Ok(robots) => {
@@ -604,7 +600,7 @@ impl Worker {
             self.decide(item, carried, None, now, &mut hint).await
         };
 
-        let (retry_reasons, to_apply): (Vec<Action>, Vec<Action>) = actions
+        let (retry_reasons, mut to_apply): (Vec<Action>, Vec<Action>) = actions
             .into_iter()
             .partition(|a| matches!(a, Action::Retry { .. }));
         let mut retry = retry_reasons.into_iter().find_map(|a| match a {
@@ -614,6 +610,9 @@ impl Worker {
             }),
             _ => None,
         });
+        if item.reason == FetchReason::Revalidate {
+            retry = self.track_revalidation(item, retry, &mut to_apply);
+        }
         if !to_apply.is_empty()
             && let Err(e) = self.writer.apply(to_apply.clone()).await
         {
@@ -628,6 +627,59 @@ impl Worker {
             actions: to_apply,
             retry,
         }
+    }
+
+    /// Keep the host's count of failed revalidation passes (audit D5): a revalidation that
+    /// succeeded resets it, and one that gives up counts its pass. Once the count reaches
+    /// [`FAILED_REVALIDATION_PASSES_LIMIT`], a revalidation that gives up removes its record
+    /// instead, so this returns no retry and adds the removal to `to_apply`.
+    fn track_revalidation(
+        &self,
+        item: &QueuedFetch,
+        retry: Option<RetryRequest>,
+        to_apply: &mut Vec<Action>,
+    ) -> Option<RetryRequest> {
+        let uri = item.uri.as_str();
+        let Some(host) = uri_host_key(uri) else {
+            return retry;
+        };
+        let store = self.store.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(request) = retry else {
+            if let Err(e) = store.clear_failed_revalidations(&host) {
+                tracing::warn!(uri, host, error = %e, "failed to reset failed revalidations");
+            }
+            return None;
+        };
+        if item.attempts + 1 < self.config.max_transient_attempts {
+            return Some(request);
+        }
+        let passes = match store
+            .sweep_pass()
+            .and_then(|pass| store.record_failed_revalidation(&host, pass))
+        {
+            Ok(passes) => passes,
+            Err(e) => {
+                tracing::warn!(uri, host, error = %e, "failed to count a failed revalidation");
+                return Some(request);
+            }
+        };
+        drop(store);
+        if passes < FAILED_REVALIDATION_PASSES_LIMIT {
+            return Some(request);
+        }
+        let removal = remove_carried(uri, item.record.as_deref());
+        if removal.is_empty() {
+            return Some(request);
+        }
+        tracing::warn!(
+            uri,
+            host,
+            passes,
+            reason = request.reason,
+            "origin has failed revalidation too many passes in a row; removing"
+        );
+        to_apply.extend(removal);
+        None
     }
 
     /// `robots`: the rules a crawl submission is fetched under; `None` for everything else.
@@ -950,6 +1002,29 @@ impl Worker {
             Err(e) => tracing::error!(error = %e, "a fetch task failed"),
         }
     }
+}
+
+/// Remove the record a queue item carries, without a tombstone, so the object can come back
+/// if its server announces it again.
+fn remove_carried_record(uri: &str, carried: Option<Carried>) -> Vec<Action> {
+    match carried {
+        Some(Carried::Post(record)) => vec![Action::RemovePost {
+            uri: uri.to_string(),
+            record: Some(record),
+            tombstone: false,
+        }],
+        Some(Carried::Account(record)) => vec![Action::RemoveAccount {
+            uri: uri.to_string(),
+            record: Some(record),
+            tombstone: false,
+        }],
+        None => Vec::new(),
+    }
+}
+
+/// [`remove_carried_record`] for the queue's encoded `record` column.
+fn remove_carried(uri: &str, record: Option<&str>) -> Vec<Action> {
+    remove_carried_record(uri, record.and_then(|text| decode_carried(text).ok()))
 }
 
 /// Removes `item`'s row unless the URI was enqueued again while it was in flight, in which case
