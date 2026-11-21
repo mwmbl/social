@@ -560,14 +560,13 @@ impl Core {
                 if tombstone {
                     self.tombstone_object(&uri)?;
                 }
-                if let Some(record) = &record {
-                    self.posts
-                        .delete_record(record)
-                        .map_err(index_err(operation.clone()))?;
-                }
-                // Also by URI: catches a newer version stored under the same `uri:` key.
-                let outcome = self.posts.delete(&uri).map_err(index_err(operation))?;
-                if record.is_none() && outcome == DeleteOutcome::NotFound && !tombstone {
+                // A miss, carried record or not: a newer version's `uri:` copy may have fallen
+                // off its page, so only a tombstone lets the sweep find its other copies (D7).
+                let outcome = self
+                    .posts
+                    .remove(&uri, record.as_ref())
+                    .map_err(index_err(operation))?;
+                if outcome == DeleteOutcome::NotFound && !tombstone {
                     self.tombstone_object(&uri)?;
                 }
                 Ok(())
@@ -612,13 +611,11 @@ impl Core {
                 if tombstone {
                     self.tombstone_object(&uri)?;
                 }
-                if let Some(record) = &record {
-                    self.accounts
-                        .delete_record(record)
-                        .map_err(index_err(operation.clone()))?;
-                }
-                let outcome = self.accounts.delete(&uri).map_err(index_err(operation))?;
-                if record.is_none() && outcome == DeleteOutcome::NotFound && !tombstone {
+                let outcome = self
+                    .accounts
+                    .remove(&uri, record.as_ref())
+                    .map_err(index_err(operation))?;
+                if outcome == DeleteOutcome::NotFound && !tombstone {
                     self.tombstone_object(&uri)?;
                 }
                 Ok(())

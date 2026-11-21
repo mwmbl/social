@@ -405,17 +405,20 @@ approach, we find the document in the index and re-tokenise it.
 record.** An edit whose `uri:` lookup missed leaves copies of the old version under keys the
 new version doesn't have. A delete that finds the new version can't see those, so without the
 tombstone the old text would stay searchable until the sweep revalidated it. The tombstone
-filters it at once and the sweep removes it. Deletes found by revalidation don't need one: the
-stale copies they can't see have an old `checked` and get revalidated themselves.
+filters it at once and the sweep removes it. Any other delete adds one whenever the `uri:`
+lookup misses, even when revalidation carried the stored record: a newer version indexed under
+other keys whose `uri:` copy fell off its page can only be found by a tombstone (audit D7). The
+lookup runs before the carried record is removed, since that also clears the shared `uri:` key
+(`SocialIndex::remove`).
 
 **Revalidation** hands back the stored record. If the object is live and consented, the writer
 calls `replace(old, fresh)`: when the keys are unchanged, the add overwrites every copy in
 place (merging dedupes by URI and term); otherwise the old copies are removed first.
 
-Implemented in `social_index`: `SocialIndex::{add, find, delete, delete_record, upsert,
-replace}`, `Tombstones` (objects, authors, domains with subdomains), and `sweep_page`. A seeded
-property test (`social_index/tests/deletion.rs`) checks that deleted documents leave no copy on
-any page, including on crowded indexes where `uri:` lookups miss.
+Implemented in `social_index`: `SocialIndex::{add, find, delete, delete_record, remove,
+upsert, replace}`, `Tombstones` (objects, authors, domains with subdomains), and `sweep_page`.
+A seeded property test (`social_index/tests/deletion.rs`) checks that deleted documents leave
+no copy on any page, including on crowded indexes where `uri:` lookups miss.
 
 **Sweep** (also how the weekly revalidation the spec requires is done):
 
@@ -428,7 +431,8 @@ any page, including on crowded indexes where `uri:` lookups miss.
     queue entry carries the stored record**, which is a few hundred bytes, and the queue is
     bounded. If the object is still live and consented, the record is rewritten with a fresh
     `checked`. If it's gone (404, 410, Tombstone, not public, or consent lost), the record
-    is re-tokenised and removed directly, with no URI lookup or tombstone needed.
+    is re-tokenised and removed directly, along with any newer version the URI lookup
+    finds. If that lookup misses, a tombstone covers newer copies it couldn't see.
 - A record shows up once per key it was indexed under, so the sweep deduplicates by URI. Keep a
   bounded in-memory set for the current page range, plus the queue's own URI deduplication.
 - Records that dropped off every page are simply gone. That is the index's normal lossiness,
