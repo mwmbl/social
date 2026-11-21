@@ -8,6 +8,8 @@ use serde::Deserialize;
 use social_index::KeyScheme;
 use tokenize::KeyConfig;
 
+use crate::decide::REFUSED_ATTEMPTS;
+
 /// The prefix of every environment override.
 pub const ENV_PREFIX: &str = "MWMBL_SOCIAL_";
 /// Names the config file path when `--config` is not given.
@@ -74,7 +76,8 @@ pub struct Config {
     /// rest are rescheduled. 0 turns the budget off. Announcements and backfill are not
     /// budgeted.
     pub revalidate_interval_per_host_ms: u64,
-    /// A fetch that fails transiently this many times is given up on.
+    /// A fetch that fails transiently this many times is given up on. Must be at least
+    /// `REFUSED_ATTEMPTS`, so repeated 401/403 answers count as refused and remove the item.
     pub max_transient_attempts: i64,
     /// How many objects each FASP backfill request asks a server for, per category.
     pub backfill_max_count: u32,
@@ -362,8 +365,16 @@ impl Config {
         if self.sweep_period_secs == 0 {
             return Err(invalid("sweep_period_secs", "must be greater than 0"));
         }
-        if self.max_transient_attempts < 1 {
-            return Err(invalid("max_transient_attempts", "must be at least 1"));
+        // Below this a 401 or 403 is given up on as transient before it can count as refused,
+        // so a post whose host stops serving it would never be removed.
+        if self.max_transient_attempts < REFUSED_ATTEMPTS {
+            return Err(invalid(
+                "max_transient_attempts",
+                &format!(
+                    "is {}, but must be at least REFUSED_ATTEMPTS ({REFUSED_ATTEMPTS})",
+                    self.max_transient_attempts
+                ),
+            ));
         }
         if self.backfill_max_count == 0 {
             return Err(invalid("backfill_max_count", "must be greater than 0"));
@@ -690,6 +701,14 @@ mod tests {
         assert!(bad(&|c| c.queue_cap = 0).is_some());
         assert!(bad(&|c| c.sweep_period_secs = 0).is_some());
         assert!(bad(&|c| c.max_transient_attempts = 0).is_some());
+        // D8: below REFUSED_ATTEMPTS a 401/403 never removes anything. The error names both.
+        assert!(
+            bad(&|c| c.max_transient_attempts = REFUSED_ATTEMPTS - 1)
+                .is_some_and(|e| e.contains("max_transient_attempts")
+                    && e.contains(&format!("is {}", REFUSED_ATTEMPTS - 1))
+                    && e.contains(&format!("REFUSED_ATTEMPTS ({REFUSED_ATTEMPTS})")))
+        );
+        assert!(bad(&|c| c.max_transient_attempts = REFUSED_ATTEMPTS).is_none());
         assert!(
             bad(&|c| c.backfill_max_count = 0).is_some_and(|e| e.contains("backfill_max_count"))
         );

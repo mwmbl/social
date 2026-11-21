@@ -169,6 +169,27 @@ impl<T: Keyed> SocialIndex<T> {
         }
     }
 
+    /// Delete a record we may hold (`carried`, from revalidation) and whatever version the
+    /// `uri:` lookup finds. The lookup runs first, since removing the carried record also
+    /// clears the shared `uri:` key and would hide a newer version indexed under other keys.
+    /// `NotFound` means the lookup missed, carried record or not: the caller must tombstone.
+    pub fn remove(&mut self, uri: &str, carried: Option<&T>) -> Result<DeleteOutcome, IndexError> {
+        let found = self.find(uri)?;
+        let mut copies = match carried {
+            Some(record) => self.delete_record(record)?,
+            None => 0,
+        };
+        let Some(found) = found else {
+            return Ok(DeleteOutcome::NotFound);
+        };
+        let same_keys = carried
+            .is_some_and(|c| c.uri() == uri && c.keys(&self.scheme) == found.keys(&self.scheme));
+        if !same_keys {
+            copies += self.delete_record(&found)?;
+        }
+        Ok(DeleteOutcome::Removed { copies })
+    }
+
     /// Store a new version of something that may already be indexed: delete the old version
     /// by URI lookup, then add. Returns what the delete found.
     pub fn upsert(&mut self, record: &T) -> Result<DeleteOutcome, IndexError> {

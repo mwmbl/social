@@ -115,7 +115,7 @@ async fn remove_post_tombstone_rules() {
         .unwrap();
     assert_eq!(tombstones(&env), 1);
 
-    // A record in hand and a lookup that finds nothing: no tombstone (revalidation).
+    // A record in hand that the URI lookup also finds: every copy is seen, no tombstone.
     let two = env.search_posts("birch").remove(0);
     let stored = env
         .post_pages()
@@ -133,6 +133,18 @@ async fn remove_post_tombstone_rules() {
     assert!(env.search_posts("birch").is_empty());
     assert_eq!(tombstones(&env), 1);
 
+    // A record in hand and a lookup that misses: a tombstone (D7), since a newer version
+    // whose `uri:` copy fell off its page could only be found by URI.
+    env.handle
+        .apply(vec![Action::RemovePost {
+            uri: "http://h.example/s/405".into(),
+            record: Some(post("http://h.example/s/405", "dogwood")),
+            tombstone: false,
+        }])
+        .await
+        .unwrap();
+    assert_eq!(tombstones(&env), 2);
+
     // Lifecycle deletes always tombstone, even when found.
     env.handle
         .apply(vec![Action::RemovePost {
@@ -143,10 +155,42 @@ async fn remove_post_tombstone_rules() {
         .await
         .unwrap();
     assert!(env.search_posts("cedar").is_empty());
-    assert_eq!(tombstones(&env), 2);
+    assert_eq!(tombstones(&env), 3);
     assert!(uris(&env).is_empty());
     // The tombstone is also in memory.
-    assert_eq!(env.handle.stats().await.unwrap().tombstones, 2);
+    assert_eq!(env.handle.stats().await.unwrap().tombstones, 3);
+}
+
+/// D7: revalidation carries version 1, but version 2 is indexed under new keys before it runs.
+/// Removing version 1 by its keys also clears the shared `uri:` copy, so the URI lookup must
+/// run first, or it misses and version 2 stays searchable with no tombstone.
+#[tokio::test]
+async fn removing_a_carried_record_also_removes_a_newer_version() {
+    let env = TestEnv::new().await;
+    let uri = "http://h.example/s/7";
+    let v1 = post(uri, "walnut");
+    let v2 = post(uri, "hazelnut");
+    for record in [v1.clone(), v2] {
+        env.handle
+            .apply(vec![Action::IndexPost {
+                record,
+                replaces: None,
+            }])
+            .await
+            .unwrap();
+    }
+    assert_eq!(env.search_posts("hazelnut").len(), 1);
+    env.handle
+        .apply(vec![Action::RemovePost {
+            uri: uri.into(),
+            record: Some(v1),
+            tombstone: false,
+        }])
+        .await
+        .unwrap();
+    assert!(env.search_posts("hazelnut").is_empty());
+    assert!(uris(&env).is_empty(), "a copy is left on a page");
+    assert!(env.store.list_tombstones().unwrap().is_empty());
 }
 
 #[tokio::test]

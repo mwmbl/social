@@ -63,7 +63,7 @@ If PR 0 isn't merged quickly, all fix PRs stack on `audit/2026-11-19` instead.
 | 7 | D3 | Act on an author's refusal only when the author `id` is its fetch URI and on the post's origin | main | |
 | 8 | D4 | `undo` of a Follow also removes the account record | main | |
 | 9 | D5 | Count failed revalidations and remove after the limit (decision 2); update `PLAN.md` | 5 | |
-| 10 | D7, D8 | Tombstone whenever the URI lookup misses; require `max_transient_attempts >= REFUSED_ATTEMPTS` | main | |
+| 10 | D7, D8 | Tombstone whenever the URI lookup misses; require `max_transient_attempts >= REFUSED_ATTEMPTS` | main | ✓ |
 | 11 | E9 | Watch the writer thread and stop the process if it ends unexpectedly | main | |
 | **SSRF and amplification** |||||
 | 12 | B1, F7 | `.no_proxy()` in `client_builder`; warn at start-up when `allow_private_addresses` or `allow_http` is on | main | |
