@@ -4,12 +4,19 @@
 //! Parsing is structural only. Whether we may index something is `apub::consent`'s job, and
 //! callers run it on the raw JSON first.
 
+use std::collections::HashSet;
+
 use serde_json::{Map, Value};
 use thiserror::Error;
 use url::Url;
 
 const POST_TYPES: [&str; 4] = ["Note", "Article", "Page", "Question"];
 const ACTOR_TYPES: [&str; 5] = ["Person", "Service", "Group", "Application", "Organization"];
+/// Most hashtags [`parse_post`] keeps from `tag`; the rest are dropped. Mastodon allows
+/// no more than a handful per post in practice and Lemmy none, so 64 loses nothing real, while
+/// a hostile object (up to 1 MiB) can't make every later step loop over ~30k tags (audit E3).
+/// Only the first ten reach index keys anyway (`KeyConfig::special`).
+pub const MAX_HASHTAGS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ParseError {
@@ -202,7 +209,8 @@ fn language_tag(value: &Value) -> Option<String> {
     (!tag.is_empty() && !tag.eq_ignore_ascii_case("und")).then(|| tag.to_owned())
 }
 
-/// Names of `Hashtag` items in `tag` (a list or a single object), without the `#`.
+/// Names of `Hashtag` items in `tag` (a list or a single object), without the `#`, deduplicated
+/// in first-seen order and capped at [`MAX_HASHTAGS`].
 fn hashtags(tag: Option<&Value>) -> Vec<String> {
     let items: Vec<&Value> = match tag {
         Some(Value::Array(items)) => items.iter().collect(),
@@ -210,7 +218,11 @@ fn hashtags(tag: Option<&Value>) -> Vec<String> {
         _ => Vec::new(),
     };
     let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
     for item in items {
+        if out.len() >= MAX_HASHTAGS {
+            break;
+        }
         let Some(obj) = item.as_object() else {
             continue;
         };
@@ -221,7 +233,7 @@ fn hashtags(tag: Option<&Value>) -> Vec<String> {
             continue;
         };
         let name = name.trim().trim_start_matches('#');
-        if !name.is_empty() && !out.iter().any(|seen| seen == name) {
+        if !name.is_empty() && seen.insert(name) {
             out.push(name.to_owned());
         }
     }

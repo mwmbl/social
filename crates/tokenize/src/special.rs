@@ -1,5 +1,7 @@
 //! Hashtag and mention scanners, written by hand over chars.
 
+use std::collections::HashSet;
+
 use unicode_normalization::UnicodeNormalization;
 
 fn is_word_char(c: char) -> bool {
@@ -41,9 +43,11 @@ pub fn special_keys(text: &str) -> Vec<String> {
     let normalised: String = text.nfkc().collect();
     let chars: Vec<char> = normalised.chars().collect();
     let mut keys: Vec<String> = Vec::new();
+    // A set, not `keys.contains`, so text with many distinct tags stays linear (audit E3).
+    let mut seen: HashSet<String> = HashSet::new();
     let mut push = |key: String| {
         let key = key.to_lowercase();
-        if !keys.contains(&key) {
+        if seen.insert(key.clone()) {
             keys.push(key);
         }
     };

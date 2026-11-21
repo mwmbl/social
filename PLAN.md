@@ -347,7 +347,10 @@ Tuple layouts, with required fields first and optional ones last so they can be 
     human-facing URL isn't stored; clients resolve the URI.
   - `author_uri`: the actor id. Author tombstones match on it.
   - `extract`: plain text of the content with HTML stripped. Includes the content warning text
-    and hashtags. Truncated to about 300 chars.
+    and hashtags (at most the first 64 `Hashtag` items of `tag`, `apub::objects::MAX_HASHTAGS`,
+    so a hostile object can't make every later step loop over thousands). Truncated to about
+    300 chars. The cap changes what is stored, not how keys derive from it, so it needs no
+    tokeniser version bump.
   - `published` and `checked`: Unix seconds. `checked` is when we last fetched or confirmed the
     object, and the sweep uses it.
   - `title`: the `name` of an Article/Page, or a Lemmy post title.
@@ -477,6 +480,9 @@ Unicode word segmentation (`unicode-segmentation`) with lowercasing and NFKC nor
 - **Key selection:** keep Mwmbl's approach (first N tokens + first N bigrams per field), but
   make N configurable.
 - **Stopwords:** keep Mwmbl's English list, and make it per-language later.
+- **Query keys:** every non-stopword token, bigram and hashtag/mention of the query, keeping
+  the first 32 (`tokenize::MAX_QUERY_KEYS`). Each key is one page read, so this bounds a
+  search's cost. Query keys are only looked up, so the cap needs no tokeniser version bump.
 
 Put this in its own crate so it can be offered upstream.
 
@@ -516,6 +522,8 @@ Doing this early is part of Stage 0's done criteria.
 7. The sweep (page walk, revalidation queueing, tombstone application and clearing), with a
    configurable cycle time so tests can run it quickly.
 8. Search API: `GET /api/v1/search/posts?q=` and `/api/v1/search/accounts?q=`, returning JSON.
+   A `q` over 512 bytes after trimming gets a 422 rather than being cut, so a client never
+   silently gets results for a different query.
 9. CLI subcommands:
    - `serve`
    - `ingest <uri>`, which queues and fetches one object or actor

@@ -14,6 +14,12 @@ use tinyindex::IndexError;
 pub const MAX_LIMIT: usize = 100;
 /// Results returned when `limit` is not given.
 pub const DEFAULT_LIMIT: usize = 20;
+/// Longest `q` the search API takes, in UTF-8 bytes after trimming. Longer ones get a 422
+/// rather than being cut, since a cut query would silently search for something else. 512
+/// bytes is several sentences, far more than a search box needs, and bounds the tokenising
+/// work one unauthenticated request can ask for (audit E1); `tokenize::MAX_QUERY_KEYS` then
+/// bounds its page reads.
+pub const MAX_QUERY_BYTES: usize = 512;
 
 /// A post as the search API returns it. Field order is the JSON order.
 #[derive(Debug, Clone, PartialEq, Serialize)]
