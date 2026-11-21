@@ -18,8 +18,9 @@
 //! Both are off when `allow_private` is set: tests and the Docker dev setups talk to loopback
 //! and private Docker networks.
 //!
-//! A proxy configured through the environment (`HTTPS_PROXY` and friends) resolves names
-//! itself, so with one the filter applies to the proxy's address only.
+//! [`client_builder`] also turns off proxies from the environment (`HTTPS_PROXY` and friends),
+//! with or without `allow_private`: a proxy resolves names itself, so through one the filter
+//! would see only the proxy's address and any name could reach an internal service.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -190,10 +191,11 @@ impl Resolve for PublicResolver {
 
 /// The start of every HTTP client this project builds. Unless `allow_private`, names are
 /// resolved by [`PublicResolver`] and redirects to non-public IP literals are refused (other
-/// redirects are followed, up to 10, as by default). Callers still run [`check_url`] on the
-/// URLs they request.
+/// redirects are followed, up to 10, as by default). Proxies from the environment are never
+/// used, so every connection goes where the resolver says. Callers still run [`check_url`] on
+/// the URLs they request.
 pub fn client_builder(allow_private: bool) -> reqwest::ClientBuilder {
-    let builder = reqwest::Client::builder();
+    let builder = reqwest::Client::builder().no_proxy();
     if allow_private {
         return builder;
     }

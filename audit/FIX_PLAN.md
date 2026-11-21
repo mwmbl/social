@@ -66,7 +66,7 @@ If PR 0 isn't merged quickly, all fix PRs stack on `audit/2026-11-19` instead.
 | 10 | D7, D8 | Tombstone whenever the URI lookup misses; require `max_transient_attempts >= REFUSED_ATTEMPTS` | main | |
 | 11 | E9 | Watch the writer thread and stop the process if it ends unexpectedly | main | |
 | **SSRF and amplification** |||||
-| 12 | B1, F7 | `.no_proxy()` in `client_builder`; warn at start-up when `allow_private_addresses` or `allow_http` is on | main | |
+| 12 | B1, F7 | `.no_proxy()` in `client_builder`; warn at start-up when `allow_private_addresses` or `allow_http` is on | main | ✓ |
 | 13 | B2 | Strip one trailing dot in `host_key` and `uri_host_key` | main | |
 | 14 | B5 | FASP client: no redirects, or only same-origin https | main | |
 | 15 | C1, C2 | Drop announced URIs not on the registration's host; dedupe `object_uris` in `clean_uris` | main | |

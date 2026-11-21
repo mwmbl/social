@@ -224,6 +224,28 @@ fn build_fetcher(
     Fetcher::new(fetcher).context("failed to build the ActivityPub fetch client")
 }
 
+/// Logs a warning naming each of [`unsafe_flags`], when `serve` starts.
+fn warn_unsafe_flags(config: &Config) {
+    for flag in unsafe_flags(config) {
+        tracing::warn!(
+            flag,
+            "{flag} is on: for tests and dev setups only, never production"
+        );
+    }
+}
+
+/// The config flags that are on and weaken outbound request checks. `serve` warns about each
+/// one, so a production deployment copied from a dev compose file says so in its logs.
+fn unsafe_flags(config: &Config) -> Vec<&'static str> {
+    [
+        ("allow_private_addresses", config.allow_private_addresses),
+        ("allow_http", config.allow_http),
+    ]
+    .into_iter()
+    .filter_map(|(name, on)| on.then_some(name))
+    .collect()
+}
+
 fn worker_config(config: &Config) -> WorkerConfig {
     WorkerConfig {
         fetch_concurrency: config.fetch_concurrency,
@@ -317,6 +339,7 @@ fn spawn_background(
 
 async fn serve(config: Config) -> anyhow::Result<()> {
     config.require_base_url()?;
+    warn_unsafe_flags(&config);
     let lock = acquire_lock(&config)?;
     let listener = tokio::net::TcpListener::bind(&config.listen)
         .await
@@ -347,6 +370,7 @@ pub async fn serve_on(
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     config.require_base_url()?;
+    warn_unsafe_flags(&config);
     let lock = acquire_lock(&config)?;
     serve_with_lock(config, lock, listener, shutdown).await
 }
@@ -1115,6 +1139,21 @@ mod tests {
     #[test]
     fn the_cli_definition_is_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn unsafe_flags_are_named() {
+        let mut config = Config::default();
+        assert_eq!(unsafe_flags(&config), [] as [&str; 0]);
+        config.allow_private_addresses = true;
+        assert_eq!(unsafe_flags(&config), ["allow_private_addresses"]);
+        config.allow_http = true;
+        assert_eq!(
+            unsafe_flags(&config),
+            ["allow_private_addresses", "allow_http"]
+        );
+        config.allow_private_addresses = false;
+        assert_eq!(unsafe_flags(&config), ["allow_http"]);
     }
 
     #[test]
