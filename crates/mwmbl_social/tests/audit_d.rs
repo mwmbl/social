@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use apub::consent::ConsentContext;
 use common::{PUBLIC, TestEnv};
+use mwmbl_social::activities::{self, Effect, Sender};
 use mwmbl_social::decide::{Action, Author, Fetched, decide_post};
 use mwmbl_social::now_secs;
 use mwmbl_social::sweep::{SweepConfig, step};
@@ -159,11 +160,56 @@ fn a_post_cannot_make_us_remove_an_account_on_another_host() {
     assert!(!touches_victim, "{actions:?}");
 }
 
+/// What the inbox does for an `Undo{Follow}` of our actor from `actor`: the index and queue
+/// effects of [`activities::handle`], applied as `InboxApp` applies them. Delivering to the
+/// remote actor (our own `Undo`) is left out.
+async fn unfollow_from(env: &mut TestEnv, actor: &str) {
+    let our_actor = "https://social.example/actor";
+    let sender = Sender {
+        actor,
+        is_group: false,
+        our_follow: None,
+        follows_us: env.store.is_follow_optin(actor).unwrap(),
+    };
+    let undo = json!({"type": "Undo", "actor": actor,
+        "object": {"type": "Follow", "actor": actor, "object": our_actor}});
+    let effects = activities::handle(our_actor, &sender, &undo);
+    assert!(!effects.is_empty(), "the undo was not an unfollow");
+    for effect in effects {
+        match effect {
+            Effect::RemoveFollowOptin { actor_uri } => {
+                env.store.remove_follow_optin(&actor_uri).unwrap();
+            }
+            Effect::AddAuthorTombstone { actor_uri } => {
+                env.handle
+                    .apply(vec![Action::AddAuthorTombstone { actor_uri }])
+                    .await
+                    .unwrap();
+            }
+            Effect::RemoveAccount { uri, tombstone } => {
+                env.handle
+                    .apply(vec![Action::RemoveAccount {
+                        uri,
+                        record: None,
+                        tombstone,
+                    }])
+                    .await
+                    .unwrap();
+            }
+            Effect::Fetch { uri, kind, .. } => {
+                env.store
+                    .enqueue(&announce(&uri, kind, 0), now_secs(), 100)
+                    .unwrap();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// D4: an account indexed only because it follows our actor (no `discoverable` flag of its
 /// own) stays in account search after it unfollows, if the re-fetch the unfollow queues fails:
 /// the worker gives up and nothing removes the account until its revalidation, days later.
 #[tokio::test]
-#[ignore = "AUDIT: D4 - fails until fixed"]
 async fn an_unfollow_withdraws_a_flagless_account_even_if_its_refetch_fails() {
     let mut env = TestEnv::with_attempts(1).await;
     let carol = env.fake.url("/users/carol");
@@ -177,17 +223,7 @@ async fn an_unfollow_withdraws_a_flagless_account_even_if_its_refetch_fails() {
         .await;
     assert_eq!(env.search_accounts("quinceberry").len(), 1);
 
-    // Carol unfollows: what the inbox does for `Undo{Follow}` (activities::undo).
-    env.store.remove_follow_optin(&carol).unwrap();
-    env.handle
-        .apply(vec![Action::AddAuthorTombstone {
-            actor_uri: carol.clone(),
-        }])
-        .await
-        .unwrap();
-    env.store
-        .enqueue(&announce(&carol, FetchKind::Actor, 0), now_secs(), 100)
-        .unwrap();
+    unfollow_from(&mut env, &carol).await;
     // Her server is having a bad day.
     env.fake.set_failing("/users/carol");
     env.worker.drain(&mut env.store).await.unwrap();
@@ -196,6 +232,35 @@ async fn an_unfollow_withdraws_a_flagless_account_even_if_its_refetch_fails() {
     assert!(
         env.search_accounts("quinceberry").is_empty(),
         "consent was withdrawn but the account is still served"
+    );
+}
+
+/// D4, the other way round: an account whose own flags consent is removed on the unfollow, and
+/// the refetch the unfollow queues indexes it again.
+#[tokio::test]
+async fn an_unfollow_keeps_an_account_that_consents_on_its_own_flags() {
+    let mut env = TestEnv::with_attempts(1).await;
+    let dan = env.fake.url("/users/dan");
+    env.fake.set_doc(
+        "/users/dan",
+        json!({"id": dan, "type": "Person", "preferredUsername": "dan",
+            "name": "Dan Marrowfat", "discoverable": true, "inbox": format!("{dan}/inbox")}),
+    );
+    env.store.add_follow_optin(&dan, now_secs()).unwrap();
+    env.ingest("/users/dan", FetchKind::Actor, FetchReason::Announce)
+        .await;
+    assert_eq!(env.search_accounts("marrowfat").len(), 1);
+
+    unfollow_from(&mut env, &dan).await;
+    assert!(
+        env.search_accounts("marrowfat").is_empty(),
+        "removed until the refetch confirms consent"
+    );
+    env.worker.drain(&mut env.store).await.unwrap();
+    assert_eq!(
+        env.search_accounts("marrowfat").len(),
+        1,
+        "his own `discoverable: true` still consents"
     );
 }
 
