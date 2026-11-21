@@ -179,6 +179,13 @@ we only need a fixed component set.
   subscription/backfill management.
 - **All index writes go through one writer task**, fed by a channel. That avoids the fcntl page
   locks Mwmbl uses for multiple processes.
+- **A dead writer stops `serve`.** The writer thread only ends while handles to it exist if
+  it panics. `serve` watches for that (the channel's receiver is dropped), logs an error,
+  stops every task and returns an error, so the process exits non-zero instead of serving
+  stale results and answering 202 to removals it can no longer apply. On a normal shutdown
+  the signal comes before the handles are dropped, so it is not counted. Removals accepted
+  just before the writer died are still lost; queueing them durably before the 202 is a
+  later change (audit E9).
 - **Across processes** the writer holds an exclusive lock on `{data_dir}/writer.lock`
   (`File::try_lock`); `serve` refuses to start if it is held. `ingest` and `forget` run
   in-process (own writer and fetcher) when the lock is free. When a server holds it they only

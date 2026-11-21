@@ -355,7 +355,20 @@ async fn serve_with_lock(
     config: Config,
     lock: WriterLock,
     listener: tokio::net::TcpListener,
-    shutdown_rx: watch::Receiver<bool>,
+    signal: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let writer = Writer::start_with_lock(&config, lock)?;
+    serve_with_writer(config, writer, listener, signal).await
+}
+
+/// Serves until `signal` fires or the writer thread ends. The writer only ends on its own by
+/// accident (a panic), and then removals would be answered 202 and lost while search kept
+/// serving stale results, so that shuts everything down and returns an error.
+async fn serve_with_writer(
+    config: Config,
+    writer: Writer,
+    listener: tokio::net::TcpListener,
+    signal: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let base_url = config.require_base_url()?.to_string();
     let key = load_or_generate(&config.keys_dir())?;
@@ -363,8 +376,9 @@ async fn serve_with_lock(
         .verifying_key()
         .to_spki_pem()
         .context("failed to encode the actor's public key")?;
-    let writer = Writer::start_with_lock(&config, lock)?;
     let handle = writer.handle();
+    // Every task below stops on this, sent on `signal` or when the writer dies.
+    let (stop_tx, shutdown_rx) = watch::channel(false);
     let fetcher = Arc::new(build_fetcher(&config, &base_url, key)?);
     let seeded = seed_hosts(&fetcher, &open_store(&config)?, now_secs())?;
     tracing::info!(hosts = seeded, "restored host state");
@@ -438,8 +452,52 @@ async fn serve_with_lock(
         })
     };
 
-    signalled(shutdown_rx).await;
-    tracing::info!("shutting down");
+    let writer_died = wait_for_stop(signal, &handle, &config).await;
+    let _ = stop_tx.send(true);
+    wait_for_tasks(server, tasks).await;
+    if let Err(e) = persist_hosts(&fetcher, &open_store(&config)?, now_secs()) {
+        tracing::error!(error = %e, "failed to persist host state");
+    }
+    drop(handle);
+    writer.finish();
+    if writer_died {
+        anyhow::bail!(
+            "the index writer thread for {} ended unexpectedly, so the server stopped",
+            config.data_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// `POST /api/v1/crawl/submissions`, which answers 404 unless `crawl_tokens` are configured.
+/// Wait for the shutdown signal or the writer thread's end, whichever comes first. Returns
+/// whether the writer ended.
+async fn wait_for_stop(
+    signal: watch::Receiver<bool>,
+    handle: &WriterHandle,
+    config: &Config,
+) -> bool {
+    let writer_died = tokio::select! {
+        () = signalled(signal) => false,
+        () = handle.stopped() => true,
+    };
+    if writer_died {
+        tracing::error!(
+            data_dir = %config.data_dir.display(),
+            "the index writer thread ended unexpectedly; shutting down, because index writes \
+             (including removals) can no longer be applied"
+        );
+    } else {
+        tracing::info!("shutting down");
+    }
+    writer_died
+}
+
+/// Wait for the HTTP server and the background tasks to finish after the stop signal.
+async fn wait_for_tasks(
+    server: tokio::task::JoinHandle<std::io::Result<()>>,
+    mut tasks: JoinSet<()>,
+) {
     match server.await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::error!(error = %e, "the HTTP server failed"),
@@ -450,15 +508,8 @@ async fn serve_with_lock(
             tracing::error!(error = %e, "a background task failed");
         }
     }
-    if let Err(e) = persist_hosts(&fetcher, &open_store(&config)?, now_secs()) {
-        tracing::error!(error = %e, "failed to persist host state");
-    }
-    drop(handle);
-    writer.finish();
-    Ok(())
 }
 
-/// `POST /api/v1/crawl/submissions`, which answers 404 unless `crawl_tokens` are configured.
 fn crawl_routes(config: &Config, handle: &WriterHandle) -> anyhow::Result<axum::Router> {
     if !config.crawl_tokens.0.is_empty() {
         tracing::info!(
@@ -1295,6 +1346,59 @@ mod tests {
         assert!(!listed.to_string().contains("private"));
         let err = unregister(&config, id + 100).err().map(|e| e.to_string());
         assert!(err.is_some_and(|e| e.contains("no registration")));
+        Ok(())
+    }
+
+    /// E9: a writer that ends while the server runs stops the server with an error, rather
+    /// than leaving it answering 202 to removals it can no longer apply.
+    #[tokio::test]
+    async fn serve_stops_with_an_error_when_the_writer_ends() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            listen: addr.to_string(),
+            base_url: Some(format!("http://{addr}")),
+            posts_pages: 8,
+            accounts_pages: 8,
+            ..Config::default()
+        };
+        let writer = Writer::start(&config)?;
+        let handle = writer.handle();
+        let (_signal_tx, signal) = watch::channel(false);
+        let server = tokio::spawn(serve_with_writer(config, writer, listener, signal));
+        handle.halt().await;
+        drop(handle);
+        let result = tokio::time::timeout(Duration::from_secs(30), server).await??;
+        let err = result.err().map(|e| e.to_string());
+        assert!(
+            err.as_deref()
+                .is_some_and(|e| e.contains("ended unexpectedly")),
+            "{err:?}"
+        );
+        Ok(())
+    }
+
+    /// A normal shutdown is not an unexpected writer end.
+    #[tokio::test]
+    async fn serve_returns_ok_on_a_normal_shutdown() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            listen: addr.to_string(),
+            base_url: Some(format!("http://{addr}")),
+            posts_pages: 8,
+            accounts_pages: 8,
+            ..Config::default()
+        };
+        let (signal_tx, signal) = watch::channel(false);
+        let server = tokio::spawn(serve_on(config, listener, signal));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        signal_tx.send(true)?;
+        tokio::time::timeout(Duration::from_secs(30), server).await???;
         Ok(())
     }
 
