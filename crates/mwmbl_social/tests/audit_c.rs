@@ -113,12 +113,11 @@ async fn announce(fake: &FakeMastodon, body: &Value) {
     assert_eq!(reply.status, 204);
 }
 
-/// C1: a registration's announcements are not bound to its own host. The server registered as
-/// `127.0.0.1:<port>` announces a URI on another host (`localhost:<port>`, a different fake),
-/// and we fetch it: any registered server (in hosted mode, anyone who signs up) can point our
-/// fetcher at third-party hosts, 1000 URIs per signed request, with no robots.txt check.
+/// C1 (fixed): a registration's announcements are bound to its own host. The server registered
+/// as `127.0.0.1:<port>` announces a URI on another host (`localhost:<port>`, a different fake)
+/// next to one of its own: its own is fetched, the other is dropped, so a registered server
+/// cannot point our fetcher at third-party hosts.
 #[tokio::test]
-#[ignore = "AUDIT: C1 - fails until fixed"]
 async fn announced_uris_on_another_host_are_not_fetched() {
     let fake = FakeMastodon::start().await;
     let victim = FakeHost::start().await;
@@ -145,11 +144,10 @@ async fn announced_uris_on_another_host_are_not_fetched() {
     );
 }
 
-/// C2: one `trending` announcement that lists the same URI many times counts once per listing,
-/// so a single signed request takes a post to rank 100 in the trends pooled across every
+/// C2 (fixed): one `trending` announcement that lists the same URI many times counts once, so
+/// a single signed request cannot take a post to rank 100 in the trends pooled across every
 /// registration (and its author into everyone's follow recommendations).
 #[tokio::test]
-#[ignore = "AUDIT: C2 - fails until fixed"]
 async fn a_uri_repeated_in_one_trending_announcement_counts_once() {
     let fake = FakeMastodon::start().await;
     let running = serve_registered(&fake, &["data_sharing", "trends"], |_| {}).await;
