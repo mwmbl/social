@@ -193,4 +193,13 @@ CREATE INDEX registrations_fasp_id ON registrations(fasp_id);
 -- fails only the generation it read, so a request that arrives mid-fetch (audit D1) stays.
 ALTER TABLE fetch_queue ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+-- Audit D5: content whose origin stops answering is removed after a few failed revalidation
+-- passes in a row. `passes` numbers each index's completed sweep passes. Per host, the count
+-- of passes in a row in which a revalidation gave up, and the pass last counted, so a pass
+-- counts once however many of the host's records fail in it. Bounded by hosts.
+ALTER TABLE sweep_state ADD COLUMN passes INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE hosts ADD COLUMN failed_revalidation_passes INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE hosts ADD COLUMN failed_revalidation_pass INTEGER;
+",
 ];

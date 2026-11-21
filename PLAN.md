@@ -265,8 +265,9 @@ explicit user and admin actions.
   the generation it read, so a request that arrives while the URI is being fetched (a `delete`
   after a `create`) keeps the row and the URI is fetched again.
 - **`hosts`**: host, signature scheme that works (9421/cavage), backoff_until, blocked flag,
-  nodeinfo `software.name` with its check time (for Lemmy consent and crawl submissions), and a
-  cached robots.txt verdict with its fetch time (Stage 3).
+  nodeinfo `software.name` with its check time (for Lemmy consent and crawl submissions), a
+  cached robots.txt verdict with its fetch time (Stage 3), and the count of sweep passes in a
+  row in which a revalidation of the host gave up, with the pass last counted (see **Sweep**).
 - **`domain_blocks`**: admin-configured blocked domains. We neither fetch from these hosts nor
   return results from them.
 - **`tombstones`**: object or actor URI, kind (object/author), created_at.
@@ -432,6 +433,14 @@ any page, including on crowded indexes where `uri:` lookups miss.
     bounded. If the object is still live and consented, the record is rewritten with a fresh
     `checked`. If it's gone (404, 410, Tombstone, not public, or consent lost), the record
     is re-tokenised and removed directly, with no URI lookup or tombstone needed.
+  - **An origin that stops answering** (audit D5): a revalidation that gives up on transient
+    failures (5xx, timeouts, DNS gone, backoff) counts a failed pass for its host in `hosts`.
+    `sweep_state.passes` numbers the passes, and the pass in progress is the most either index
+    has finished, so a pass counts once however many of the host's records fail in it. A
+    revalidation of the host that succeeds resets the count. Once the count reaches
+    `FAILED_REVALIDATION_PASSES_LIMIT` (3, about 18 days at the default sweep), a revalidation
+    that gives up removes its record instead, without a tombstone, so the content comes back
+    if the server announces it again. We can't confirm consent for content we can't fetch.
 - A record shows up once per key it was indexed under, so the sweep deduplicates by URI. Keep a
   bounded in-memory set for the current page range, plus the queue's own URI deduplication.
 - Records that dropped off every page are simply gone. That is the index's normal lossiness,
@@ -449,6 +458,7 @@ any page, including on crowded indexes where `uri:` lookups miss.
 - a lifecycle `delete` event
 - an `update` event that turns out to fail consent
 - revalidation returning 404 or 410, a Tombstone, or lost consent
+- revalidation of a host that has failed `FAILED_REVALIDATION_PASSES_LIMIT` passes in a row
 - the account no longer being discoverable or indexable. This adds an *author* tombstone: its
   posts are filtered from results immediately and physically removed by the sweep. An author
   tombstone covers posts only. If the account is no longer discoverable, its own record is also

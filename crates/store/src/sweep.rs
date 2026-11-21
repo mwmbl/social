@@ -81,12 +81,25 @@ impl Store {
              SET last_sweep_started_at = current_sweep_started_at,
                  last_sweep_finished_at = ?2,
                  current_page = 0,
-                 current_sweep_started_at = ?2
+                 current_sweep_started_at = ?2,
+                 passes = passes + 1
              WHERE index_name = ?1",
             params![index, now],
         )
         .map_err(ctx(op.clone()))?;
         tx.commit().map_err(ctx(op))
+    }
+
+    /// The number of the sweep pass in progress: the most passes either index has completed.
+    /// Both indexes sweep over the same period, so this goes up about once a period.
+    pub fn sweep_pass(&self) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(passes), 0) FROM sweep_state",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(ctx("read the sweep pass"))
     }
 }
 
@@ -133,6 +146,19 @@ mod tests {
         assert_eq!(st.last_sweep_started_at, Some(200));
         assert_eq!(st.last_sweep_finished_at, Some(300));
         assert_eq!(st.current_sweep_started_at, 300);
+        Ok(())
+    }
+
+    #[test]
+    fn the_sweep_pass_is_the_most_passes_either_index_has_finished() -> TestResult {
+        let s = Store::open_in_memory()?;
+        assert_eq!(s.sweep_pass()?, 0);
+        s.finish_sweep("posts", 100)?;
+        assert_eq!(s.sweep_pass()?, 1);
+        s.finish_sweep("accounts", 110)?;
+        assert_eq!(s.sweep_pass()?, 1);
+        s.finish_sweep("accounts", 200)?;
+        assert_eq!(s.sweep_pass()?, 2);
         Ok(())
     }
 

@@ -206,6 +206,11 @@ impl FakeHost {
         self.state.failing.lock().unwrap().insert(path.to_string());
     }
 
+    /// Stop answering 500 for `path`.
+    pub fn set_working(&self, path: &str) {
+        self.state.failing.lock().unwrap().remove(path);
+    }
+
     pub fn hits(&self, path: &str) -> usize {
         self.state
             .hits
@@ -261,6 +266,27 @@ impl TestEnv {
     }
 
     pub async fn with_worker(worker_config: WorkerConfig) -> Self {
+        Self::with_worker_and_backoff(worker_config, None).await
+    }
+
+    /// `with_attempts`, but a failing host is backed off for only the fetcher's minimum, a second.
+    pub async fn with_short_host_backoff(max_transient_attempts: i64) -> Self {
+        Self::with_worker_and_backoff(
+            WorkerConfig {
+                fetch_concurrency: 4,
+                max_transient_attempts,
+                tick: Duration::from_millis(10),
+                revalidate_interval_per_host: Duration::ZERO,
+            },
+            Some(Duration::ZERO),
+        )
+        .await
+    }
+
+    async fn with_worker_and_backoff(
+        worker_config: WorkerConfig,
+        backoff: Option<Duration>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = test_config(&dir);
         let writer = Writer::start(&config).unwrap();
@@ -273,6 +299,9 @@ impl TestEnv {
         fetcher.allow_http = true;
         fetcher.allow_private_addresses = true;
         fetcher.min_interval_per_host = Duration::ZERO;
+        if let Some(backoff) = backoff {
+            fetcher.default_backoff = backoff;
+        }
         let worker = Arc::new(Worker::new(
             Arc::new(Fetcher::new(fetcher).unwrap()),
             handle.clone(),
