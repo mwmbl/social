@@ -1,0 +1,26 @@
+# DRAFT (audit 2026-11-19, P3): copy to .github/dependabot.yml.
+# Dependabot keeps SHA-pinned actions current (it reads the `# vX` comment) and the Docker base
+# image digests.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      # RustCrypto crates move in lockstep (see Cargo.toml); update them together.
+      rustcrypto:
+        patterns: ["rsa", "sha2", "ed25519-dalek", "getrandom", "digest", "rand_core"]
+  - package-ecosystem: cargo
+    directory: "/fuzz"
+    schedule:
+      interval: monthly
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly

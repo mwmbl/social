@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The cargo-fuzz targets are their own workspace and need nightly.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"

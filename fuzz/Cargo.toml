@@ -1,0 +1,63 @@
+# Fuzz targets for the parsers that read input from strangers. Its own workspace (excluded from
+# the main one), so the main workspace's `cargo test`/`clippy` never build it and only this
+# needs nightly. Run from the repo root: `cargo +nightly fuzz run <target>`.
+[package]
+name = "mwmbl_social_fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+# libfuzzer-sys: the cargo-fuzz harness (links libFuzzer); the only dependency new to the repo.
+libfuzzer-sys = "0.4"
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+zstd = "0.13"
+apub = { path = "../crates/apub" }
+tinyindex = { path = "../crates/tinyindex" }
+social_index = { path = "../crates/social_index" }
+mwmbl_social = { path = "../crates/mwmbl_social" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "cavage_signature"
+path = "fuzz_targets/cavage_signature.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rfc9421_structured_fields"
+path = "fuzz_targets/rfc9421_structured_fields.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "digest_headers"
+path = "fuzz_targets/digest_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tinyindex_page"
+path = "fuzz_targets/tinyindex_page.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "activity_json"
+path = "fuzz_targets/activity_json.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,69 @@
+# cargo-deny policy: `cargo deny check`. Strict on purpose; loosen an entry only with a comment
+# saying why.
+
+[graph]
+# Check what is built for the targets we ship (Linux in Docker) and develop on.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = false
+
+[advisories]
+# Vulnerabilities are always an error in the v2 schema.
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+unmaintained = "all"
+yanked = "deny"
+unsound = "all"
+# An advisory may be ignored only with its id, a reason and a date to look again, e.g.
+# { id = "RUSTSEC-0000-0000", reason = "not reachable: ...; revisit 2027-01" },
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Our own path dependencies carry no version; they are not crates.io wildcards.
+allow-wildcard-paths = true
+highlight = "all"
+# Exactly one TLS stack: rustls. Nothing may pull OpenSSL or native-tls.
+deny = [
+    { crate = "openssl", reason = "rustls only" },
+    { crate = "openssl-sys", reason = "rustls only" },
+    { crate = "native-tls", reason = "rustls only" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# Permissive licences and weak/compatible copyleft that can be combined into an AGPL-3.0
+# work. Deliberately absent: GPL-2.0-only (incompatible with (A)GPL-3.0), SSPL, BUSL,
+# Commons Clause, and anything non-OSI.
+allow = [
+    "AGPL-3.0-only",
+    "AGPL-3.0-or-later",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "0BSD",
+]

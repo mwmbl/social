@@ -884,3 +884,172 @@ async fn configured_follows_are_followed_at_start_up() {
     let listed = following(&ours.config).unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 2, "{listed}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Audit 2026-11-19 (reviewer A): failing tests that demonstrate findings. Each is ignored until
+// the finding is fixed; run with `--ignored` to see it fail.
+
+/// Waits a moment for a spawned inbox task to apply its effects.
+async fn settle() {
+    tokio::time::sleep(Duration::from_millis(700)).await;
+}
+
+#[tokio::test]
+#[ignore = "AUDIT: A1 - fails until fixed"]
+async fn audit_a1_a_cached_key_signs_for_another_actor_on_its_origin() {
+    let ours = Ours::start().await;
+    let gts = FakeHost::start("gotosocial").await;
+    ours.introduce(&gts).await;
+    // Bob carries no flags: a follow opt-in is all his posts need to be indexed.
+    let bob = gts.actor("/users/bob", "Person", KEY_A, &json!({}));
+    let eve = gts.actor("/users/eve", "Person", KEY_B, &json!({}));
+    // Eve sends anything properly signed as herself: her key is now cached.
+    let hello = json!({"id": gts.url("/users/eve/likes/1"), "type": "Like", "actor": eve,
+        "object": gts.url("/users/bob/statuses/1")});
+    assert_eq!(
+        ours.deliver(&hello, &eve, KEY_B, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    // Eve, with her own key, claims to be Bob following us.
+    let forged = json!({"id": gts.url("/users/bob/follows/1"), "type": "Follow",
+        "actor": bob, "object": ours.actor()});
+    let body = serde_json::to_vec(&forged).unwrap();
+    let status = ours
+        .post_signed(
+            "/inbox",
+            &body,
+            &format!("{eve}#main-key"),
+            KEY_B,
+            SignatureScheme::Cavage,
+        )
+        .await;
+    settle().await;
+    assert!(
+        !ours.store().is_follow_optin(&bob).unwrap(),
+        "Eve's key recorded a follow opt-in for Bob (status {status})"
+    );
+    assert_eq!(status, 401, "Eve's cached key was accepted for Bob");
+}
+
+#[tokio::test]
+#[ignore = "AUDIT: A2 - fails until fixed"]
+async fn audit_a2_a_key_document_the_actor_does_not_list_signs_for_it() {
+    let ours = Ours::start().await;
+    let gts = FakeHost::start("gotosocial").await;
+    ours.introduce(&gts).await;
+    let bob = gts.actor("/users/bob", "Person", KEY_A, &json!({}));
+    // Any JSON a user can get served from Bob's origin (an upload, say), naming Bob as the owner
+    // of a key Eve holds. Bob's actor never lists it.
+    let doc = gts.url("/files/upload.json");
+    gts.set(
+        "/files/upload.json",
+        json!({"id": doc, "publicKey": {"id": format!("{doc}#k"), "owner": bob,
+            "publicKeyPem": public_pem(KEY_B)}}),
+    );
+    let forged = json!({"id": gts.url("/users/bob/follows/1"), "type": "Follow",
+        "actor": bob, "object": ours.actor()});
+    let body = serde_json::to_vec(&forged).unwrap();
+    let status = ours
+        .post_signed(
+            "/inbox",
+            &body,
+            &format!("{doc}#k"),
+            KEY_B,
+            SignatureScheme::Rfc9421,
+        )
+        .await;
+    settle().await;
+    assert!(
+        !ours.store().is_follow_optin(&bob).unwrap(),
+        "a key Bob's actor does not list recorded his opt-in (status {status})"
+    );
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+#[ignore = "AUDIT: A3 - fails until fixed"]
+async fn audit_a3_anyone_on_an_origin_can_delete_anothers_post() {
+    let ours = Ours::start().await;
+    let gts = FakeHost::start("gotosocial").await;
+    ours.introduce(&gts).await;
+    let bob = gts.actor(
+        "/users/bob",
+        "Person",
+        KEY_A,
+        &json!({"discoverable": true, "indexable": true}),
+    );
+    let eve = gts.actor("/users/eve", "Person", KEY_B, &json!({}));
+    let post = gts.url("/users/bob/statuses/1");
+    gts.set(
+        "/users/bob/statuses/1",
+        note(&post, &bob, "Pruning the espaliered pear"),
+    );
+    // We follow Bob, he accepts, and his post is indexed.
+    follow(&ours.config, &bob).await.unwrap();
+    let our_follow = gts.delivered_to("/users/bob", "Follow")[0].clone();
+    let accept = json!({"type": "Accept", "actor": bob, "object": our_follow});
+    assert_eq!(
+        ours.deliver(&accept, &bob, KEY_A, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    wait_until("our follow to be accepted", async || {
+        ours.store().following(&bob).unwrap().unwrap().state == FollowState::Accepted
+    })
+    .await;
+    let create = json!({"type": "Create", "actor": bob, "object": post});
+    assert_eq!(
+        ours.deliver(&create, &bob, KEY_A, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    wait_until("the post to be indexed", async || {
+        ours.search("espaliered").await == [post.clone()]
+    })
+    .await;
+    // Eve, another user on Bob's server, "deletes" Bob's post, which is still live.
+    let delete = json!({"type": "Delete", "actor": eve,
+        "object": {"id": post, "type": "Tombstone"}});
+    assert_eq!(
+        ours.deliver(&delete, &eve, KEY_B, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    settle().await;
+    assert_eq!(
+        ours.search("espaliered").await,
+        std::slice::from_ref(&post),
+        "Eve removed Bob's live post"
+    );
+}
+
+#[tokio::test]
+#[ignore = "AUDIT: A4 - fails until fixed"]
+async fn audit_a4_anyone_on_an_origin_can_tombstone_another_author() {
+    let ours = Ours::start().await;
+    let gts = FakeHost::start("gotosocial").await;
+    ours.introduce(&gts).await;
+    let bob = gts.actor(
+        "/users/bob",
+        "Person",
+        KEY_A,
+        &json!({"discoverable": true, "indexable": true}),
+    );
+    let eve = gts.actor("/users/eve", "Person", KEY_B, &json!({}));
+    // An ordinary user "bans" a neighbour with removeData.
+    let block = json!({"type": "Block", "actor": eve, "object": bob, "removeData": true});
+    assert_eq!(
+        ours.deliver(&block, &eve, KEY_B, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    settle().await;
+    let tombstones = ours.store().list_tombstones().unwrap();
+    assert!(
+        !tombstones
+            .iter()
+            .any(|t| t.uri == bob && t.kind == TombstoneKind::Author),
+        "Eve tombstoned every post by Bob: {tombstones:?}"
+    );
+}
