@@ -1007,12 +1007,9 @@ async fn a2_a_key_document_signs_only_when_its_owner_lists_the_same_key() {
     }
 }
 
-#[tokio::test]
-#[ignore = "AUDIT: A3 - fails until fixed"]
-async fn audit_a3_anyone_on_an_origin_can_delete_anothers_post() {
-    let ours = Ours::start().await;
-    let gts = FakeHost::start("gotosocial").await;
-    ours.introduce(&gts).await;
+/// Bob, whom we follow and who accepted, with a post indexed for each word in `words`
+/// (`/users/bob/statuses/<n>`, from 1), and Eve, another user on his server.
+async fn bob_with_posts(ours: &Ours, gts: &FakeHost, words: &[&str]) -> (String, String) {
     let bob = gts.actor(
         "/users/bob",
         "Person",
@@ -1020,12 +1017,6 @@ async fn audit_a3_anyone_on_an_origin_can_delete_anothers_post() {
         &json!({"discoverable": true, "indexable": true}),
     );
     let eve = gts.actor("/users/eve", "Person", KEY_B, &json!({}));
-    let post = gts.url("/users/bob/statuses/1");
-    gts.set(
-        "/users/bob/statuses/1",
-        note(&post, &bob, "Pruning the espaliered pear"),
-    );
-    // We follow Bob, he accepts, and his post is indexed.
     follow(&ours.config, &bob).await.unwrap();
     let our_follow = gts.delivered_to("/users/bob", "Follow")[0].clone();
     let accept = json!({"type": "Accept", "actor": bob, "object": our_follow});
@@ -1038,16 +1029,34 @@ async fn audit_a3_anyone_on_an_origin_can_delete_anothers_post() {
         ours.store().following(&bob).unwrap().unwrap().state == FollowState::Accepted
     })
     .await;
-    let create = json!({"type": "Create", "actor": bob, "object": post});
-    assert_eq!(
-        ours.deliver(&create, &bob, KEY_A, SignatureScheme::Cavage)
-            .await,
-        202
-    );
-    wait_until("the post to be indexed", async || {
-        ours.search("espaliered").await == [post.clone()]
-    })
-    .await;
+    for (n, word) in words.iter().enumerate() {
+        let path = format!("/users/bob/statuses/{}", n + 1);
+        let post = gts.url(&path);
+        gts.set(
+            &path,
+            note(&post, &bob, &format!("Pruning the {word} pear")),
+        );
+        let create = json!({"type": "Create", "actor": bob, "object": post});
+        assert_eq!(
+            ours.deliver(&create, &bob, KEY_A, SignatureScheme::Cavage)
+                .await,
+            202
+        );
+        wait_until("the post to be indexed", async || {
+            ours.search(word).await == [post.clone()]
+        })
+        .await;
+    }
+    (bob, eve)
+}
+
+#[tokio::test]
+async fn audit_a3_anyone_on_an_origin_can_delete_anothers_post() {
+    let ours = Ours::start().await;
+    let gts = FakeHost::start("gotosocial").await;
+    ours.introduce(&gts).await;
+    let (bob, eve) = bob_with_posts(&ours, &gts, &["espaliered", "cordon"]).await;
+    let post = gts.url("/users/bob/statuses/1");
     // Eve, another user on Bob's server, "deletes" Bob's post, which is still live.
     let delete = json!({"type": "Delete", "actor": eve,
         "object": {"id": post, "type": "Tombstone"}});
@@ -1056,12 +1065,83 @@ async fn audit_a3_anyone_on_an_origin_can_delete_anothers_post() {
             .await,
         202
     );
+    // Bob deletes his other post. Once that is gone the inbox has handled Eve's Delete too: a
+    // fixed sleep alone lets this test pass when Eve's Delete simply hasn't been handled yet.
+    let own = gts.url("/users/bob/statuses/2");
+    let delete = json!({"type": "Delete", "actor": bob, "object": own});
+    assert_eq!(
+        ours.deliver(&delete, &bob, KEY_A, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    wait_until("Bob's own Delete to be acted on", async || {
+        ours.search("cordon").await.is_empty()
+    })
+    .await;
     settle().await;
     assert_eq!(
         ours.search("espaliered").await,
         std::slice::from_ref(&post),
         "Eve removed Bob's live post"
     );
+    let tombstones = ours.store().list_tombstones().unwrap();
+    assert!(
+        tombstones.iter().any(|t| t.uri == own) && !tombstones.iter().any(|t| t.uri == post),
+        "only Bob's own Delete adds a tombstone: {tombstones:?}"
+    );
+}
+
+#[tokio::test]
+async fn audit_e4_a_delete_of_an_unknown_uri_is_fetched_not_tombstoned() {
+    let ours = Ours::start().await;
+    let gts = FakeHost::start("gotosocial").await;
+    ours.introduce(&gts).await;
+    let (_bob, eve) = bob_with_posts(&ours, &gts, &[]).await;
+    // Eve claims a URI we never indexed is deleted. It is still live at her origin, and
+    // she isn't discoverable, so the fetch neither indexes nor tombstones it.
+    let made_up = gts.url("/users/eve/statuses/7");
+    gts.set("/users/eve/statuses/7", note(&made_up, &eve, "Unseen"));
+    let delete = json!({"type": "Delete", "actor": eve, "object": made_up});
+    assert_eq!(
+        ours.deliver(&delete, &eve, KEY_B, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    wait_until(
+        "the deleted URI to be fetched from its origin",
+        async || gts.hits("/users/eve/statuses/7") > 0,
+    )
+    .await;
+    settle().await;
+    let tombstones = ours.store().list_tombstones().unwrap();
+    assert!(
+        !tombstones.iter().any(|t| t.uri == made_up),
+        "a Delete of an unknown URI added a tombstone: {tombstones:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_actor_deleting_itself_is_removed() {
+    let ours = Ours::start().await;
+    let gts = FakeHost::start("gotosocial").await;
+    ours.introduce(&gts).await;
+    let (bob, _eve) = bob_with_posts(&ours, &gts, &["espaliered"]).await;
+    let delete = json!({"type": "Delete", "actor": bob, "object": bob});
+    assert_eq!(
+        ours.deliver(&delete, &bob, KEY_A, SignatureScheme::Cavage)
+            .await,
+        202
+    );
+    wait_until("Bob's account to be tombstoned", async || {
+        ours.store()
+            .list_tombstones()
+            .unwrap()
+            .iter()
+            .any(|t| t.uri == bob && t.kind == TombstoneKind::Author)
+    })
+    .await;
+    assert!(ours.search("espaliered").await.is_empty());
+    assert!(ours.store().following(&bob).unwrap().is_none());
 }
 
 #[tokio::test]

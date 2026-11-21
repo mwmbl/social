@@ -821,8 +821,16 @@ follow opt-in, admin follows, outbox backfill and crawl submissions with robots.
   drops it. `Create`/`Update` from a followed actor queue the object if it is on the actor's
   origin or the actor is a followed `Group`. `Announce` from a followed actor unwraps one
   embedded `Create`/`Update`/`Delete`/`Remove`/`Undo`/`Block`, handled as the community's;
-  boosts are ignored. `Delete` from any verified actor of an object on its origin (or from a
-  followed `Group`) removes it; of the actor itself removes the account. `Remove` from a
+  boosts are ignored. `Delete` of the actor itself removes the account. `Delete` from any
+  verified actor of an object on its origin (or from a followed `Group`) is checked against the
+  index (`activities::delete_verdict`, decided 2026-11-21 after audit finding A3): it removes
+  the stored record only when the sender is its author (a post's `attributedTo`), and is
+  ignored otherwise, since anyone on an origin can sign a `Delete`. A followed `Group`'s
+  `Delete` of a member's post (Lemmy announces both a member's own deletes and moderator
+  removals this way) queues it for a fetch instead, so the origin's `Tombstone` or 410
+  removes it. For a URI we don't store, the
+  `Delete` queues a fetch rather than adding a tombstone, so made-up URIs can't grow the
+  tombstone table faster than we fetch from that host (audit finding E4). `Remove` from a
   followed `Group` with `target` the group removes the object (moderators-collection targets
   are ignored). `Block` with `removeData: true` from a followed `Group` or the blocked user's
   own instance adds an author tombstone. `Undo{Delete|Remove}` from a followed actor queues the
@@ -930,7 +938,8 @@ only, Postgres 16, in dev/lemmy): the done-when's Lemmy half passes.
   `unfollow` was accepted too.
 - carol deleting her post, an admin's `/api/v3/post/remove` and `/api/v3/comment/remove` each
   arrived as `Announce{Delete}`, and each removed the document and left an object tombstone.
-  Lemmy then serves the post as a `Tombstone` with 410.
+  Lemmy then serves the post as a `Tombstone` with 410. (Since the A3 fix, an `Announce{Delete}`
+  of a member's post, carol's own or a moderator's, queues a fetch, and the 410 removes it.)
 - Crawl submissions: a post and a comment in a community we don't follow were indexed; `/modlog`
   and `/search/?q=…` were dropped for robots.txt; the items were fetched 60 s apart
   (`Crawl-delay`).
