@@ -311,6 +311,7 @@ mod tests {
             attempts: 0,
             last_error: None,
             enqueued_at: 0,
+            generation: 0,
         }
     }
 

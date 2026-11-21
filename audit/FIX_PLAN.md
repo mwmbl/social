@@ -58,7 +58,7 @@ If PR 0 isn't merged quickly, all fix PRs stack on `audit/2026-11-19` instead.
 | 2 | A2 | When the key document isn't the actor, fetch the owner and require it to list the key with the same PEM | 1 | ✓ |
 | 3 | A3, E4 | First find out why A3's test passes. Then ignore a Delete unless it comes from the object's author (decision 1); for an unknown URI, queue a fetch instead of adding a tombstone | 5 | |
 | 4 | A4 | Non-Group `Block` with `removeData` is only accepted from the site actor, or dropped | main | |
-| 5 | D1 | Generation number on queue rows; `complete` and `fail` only apply to the generation read | main | |
+| 5 | D1 | Generation number on queue rows; `complete` and `fail` only apply to the generation read | main | ✓ |
 | 6 | D2, D6 | `IndexPost`, `IndexAccount`, `ClearAuthorTombstone` carry the fetch start time; the writer refuses them when a newer tombstone exists | 5 | |
 | 7 | D3 | Act on an author's refusal only when the author `id` is its fetch URI and on the post's origin | main | |
 | 8 | D4 | `undo` of a Follow also removes the account record | main | |
