@@ -56,6 +56,10 @@ pub struct QueuedFetch {
     pub attempts: i64,
     pub last_error: Option<String>,
     pub enqueued_at: i64,
+    /// Bumped each time the URI is enqueued again while this row exists. [`Store::complete`]
+    /// and [`Store::fail`] only apply to the generation the worker read, so a request that
+    /// arrives while the URI is being fetched (a `delete` after a `create`) is not lost.
+    pub generation: i64,
 }
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<QueuedFetch> {
@@ -69,13 +73,15 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<QueuedFetch> {
         attempts: row.get(6)?,
         last_error: row.get(7)?,
         enqueued_at: row.get(8)?,
+        generation: row.get(9)?,
     })
 }
 
 impl Store {
     /// Adds `item` to the queue, deduplicating by URI and keeping the queue near `cap` rows.
     ///
-    /// - Already queued: one row stays. If the new item has a higher priority (lower number)
+    /// - Already queued: one row stays, and its `generation` is bumped, so a fetch already in
+    ///   flight for the URI does not complete or fail it (the URI is fetched again). If the new item has a higher priority (lower number)
     ///   the row takes that priority, reason and kind and the earlier `not_before`
     ///   ([`EnqueueOutcome::Upgraded`]); otherwise [`EnqueueOutcome::AlreadyQueued`]. An existing
     ///   `record` is never dropped, and a missing one is filled from the new item.
@@ -107,7 +113,8 @@ impl Store {
             if priority < old_priority {
                 tx.execute(
                     "UPDATE fetch_queue SET priority = ?2, reason = ?3, kind = ?4,
-                         not_before = ?5, record = COALESCE(record, ?6)
+                         not_before = ?5, record = COALESCE(record, ?6),
+                         generation = generation + 1
                      WHERE uri = ?1",
                     params![
                         item.uri,
@@ -130,7 +137,8 @@ impl Store {
                     old_not_before
                 };
                 tx.execute(
-                    "UPDATE fetch_queue SET record = COALESCE(record, ?2), not_before = ?3
+                    "UPDATE fetch_queue SET record = COALESCE(record, ?2), not_before = ?3,
+                         generation = generation + 1
                      WHERE uri = ?1",
                     params![item.uri, item.record, not_before],
                 )
@@ -187,7 +195,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT uri, kind, reason, priority, record, not_before, attempts, last_error,
-                        enqueued_at
+                        enqueued_at, generation
                  FROM fetch_queue WHERE not_before <= ?1
                  ORDER BY priority, not_before, enqueued_at, uri LIMIT ?2",
             )
@@ -198,25 +206,37 @@ impl Store {
             .map_err(ctx(op))
     }
 
-    /// Removes a finished item. Returns whether it was queued.
-    pub fn complete(&self, uri: &str) -> Result<bool, StoreError> {
+    /// Removes a finished item, if it is still at `generation` (the [`QueuedFetch::generation`]
+    /// that was read). Returns whether a row was removed: `false` if the URI is not queued, or
+    /// was enqueued again since it was read and so must be fetched again.
+    pub fn complete(&self, uri: &str, generation: i64) -> Result<bool, StoreError> {
         let changed = self
             .conn
-            .execute("DELETE FROM fetch_queue WHERE uri = ?1", [uri])
+            .execute(
+                "DELETE FROM fetch_queue WHERE uri = ?1 AND generation = ?2",
+                params![uri, generation],
+            )
             .map_err(ctx(format!("complete fetch {uri}")))?;
         Ok(changed > 0)
     }
 
-    /// Records a failed attempt: bumps `attempts`, stores `error` and reschedules to
-    /// `retry_at`. Returns whether the URI was queued.
-    pub fn fail(&self, uri: &str, error: &str, retry_at: i64) -> Result<bool, StoreError> {
+    /// Records a failed attempt on the row at `generation`: bumps `attempts`, stores `error`
+    /// and reschedules to `retry_at`. Returns whether a row was updated: `false` if the URI is
+    /// not queued, or was enqueued again since it was read (its own schedule then stands).
+    pub fn fail(
+        &self,
+        uri: &str,
+        generation: i64,
+        error: &str,
+        retry_at: i64,
+    ) -> Result<bool, StoreError> {
         let changed = self
             .conn
             .execute(
                 "UPDATE fetch_queue
-                 SET attempts = attempts + 1, last_error = ?2, not_before = ?3
-                 WHERE uri = ?1",
-                params![uri, error, retry_at],
+                 SET attempts = attempts + 1, last_error = ?3, not_before = ?4
+                 WHERE uri = ?1 AND generation = ?2",
+                params![uri, generation, error, retry_at],
             )
             .map_err(ctx(format!("fail fetch {uri}")))?;
         Ok(changed > 0)
@@ -543,16 +563,43 @@ mod tests {
     fn fail_retry_and_complete() -> TestResult {
         let s = Store::open_in_memory()?;
         s.enqueue(&item("u", FetchReason::Announce, 0), 1, 10)?;
-        assert!(s.fail("u", "HTTP 503 from x", 100)?);
-        assert!(s.fail("u", "timeout", 200)?);
+        assert!(s.fail("u", 0, "HTTP 503 from x", 100)?);
+        assert!(s.fail("u", 0, "timeout", 200)?);
         assert_eq!(s.next_due(150, 10)?.len(), 0);
         let row = s.next_due(200, 10)?.into_iter().next().ok_or("empty")?;
         assert_eq!(row.attempts, 2);
         assert_eq!(row.last_error.as_deref(), Some("timeout"));
         assert_eq!(row.not_before, 200);
-        assert!(!s.fail("missing", "e", 1)?);
-        assert!(s.complete("u")?);
-        assert!(!s.complete("u")?);
+        assert!(!s.fail("missing", 0, "e", 1)?);
+        assert!(s.complete("u", 0)?);
+        assert!(!s.complete("u", 0)?);
+        assert_eq!(s.queue_len()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_request_arriving_in_flight_outlives_the_fetch_it_raced() -> TestResult {
+        let s = Store::open_in_memory()?;
+        s.enqueue(&item("u", FetchReason::Backfill, 0), 1, 10)?;
+        let read = s.next_due(0, 1)?.into_iter().next().ok_or("empty")?;
+        assert_eq!(read.generation, 0);
+        // Enqueued again while the fetch is in flight: same priority, then an upgrade.
+        assert_eq!(
+            s.enqueue(&item("u", FetchReason::Backfill, 0), 2, 10)?,
+            EnqueueOutcome::AlreadyQueued
+        );
+        assert!(!s.fail("u", read.generation, "timeout", 100)?);
+        assert!(!s.complete("u", read.generation)?);
+        let again = s.next_due(0, 1)?.into_iter().next().ok_or("dropped")?;
+        assert_eq!((again.generation, again.attempts), (1, 0));
+        assert_eq!(
+            s.enqueue(&item("u", FetchReason::Announce, 0), 3, 10)?,
+            EnqueueOutcome::Upgraded
+        );
+        assert!(!s.complete("u", again.generation)?);
+        let last = s.next_due(0, 1)?.into_iter().next().ok_or("dropped")?;
+        assert_eq!(last.generation, 2);
+        assert!(s.complete("u", last.generation)?);
         assert_eq!(s.queue_len()?, 0);
         Ok(())
     }
@@ -561,7 +608,7 @@ mod tests {
     fn defer_reschedules_without_counting_an_attempt() -> TestResult {
         let s = Store::open_in_memory()?;
         s.enqueue(&item("u", FetchReason::Revalidate, 0), 1, 10)?;
-        s.fail("u", "timeout", 5)?;
+        s.fail("u", 0, "timeout", 5)?;
         assert!(s.defer("u", FetchReason::Revalidate, 300)?);
         assert_eq!(s.next_due(299, 10)?.len(), 0);
         let row = s.next_due(300, 10)?.into_iter().next().ok_or("empty")?;

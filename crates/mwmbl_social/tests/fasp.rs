@@ -356,7 +356,8 @@ async fn registers_activates_ingests_deletes_and_stops() {
     assert!(due_now.iter().all(|q| q.uri != edited), "fetched too early");
     let due_later = ours.store().next_due(now + 300, 10).unwrap();
     assert!(due_later.iter().any(|q| q.uri == edited), "{due_later:?}");
-    ours.store().complete(&edited).unwrap();
+    let queued = due_later.iter().find(|q| q.uri == edited).unwrap();
+    ours.store().complete(&edited, queued.generation).unwrap();
 
     // A delete event, with the object gone: removed from search, and a tombstone is left.
     fake.set_gone("/notes/n1");

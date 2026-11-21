@@ -188,4 +188,9 @@ DROP TABLE registrations;
 ALTER TABLE registrations_new RENAME TO registrations;
 CREATE INDEX registrations_fasp_id ON registrations(fasp_id);
 ",
+    "
+-- A queue row's generation, bumped when its URI is enqueued again. The worker completes or
+-- fails only the generation it read, so a request that arrives mid-fetch (audit D1) stays.
+ALTER TABLE fetch_queue ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+",
 ];
