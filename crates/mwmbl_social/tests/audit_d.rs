@@ -126,7 +126,6 @@ async fn an_index_decision_from_before_an_inbox_delete_does_not_resurrect_the_po
 /// the post's `attributedTo` or on the post's origin. A host can make us remove any account
 /// and hide all of its posts.
 #[test]
-#[ignore = "AUDIT: D3 - fails until fixed"]
 fn a_post_cannot_make_us_remove_an_account_on_another_host() {
     let post = "https://evil.example/notes/1";
     let author = "https://evil.example/users/x";
