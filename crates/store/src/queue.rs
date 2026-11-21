@@ -91,7 +91,7 @@ impl Store {
         cap: usize,
     ) -> Result<EnqueueOutcome, StoreError> {
         let op = format!("enqueue {}", item.uri);
-        let tx = self.conn.unchecked_transaction().map_err(ctx(op.clone()))?;
+        let tx = self.write_transaction().map_err(ctx(op.clone()))?;
         let priority = item.reason.priority();
 
         let existing: Option<(i64, i64)> = tx
@@ -308,6 +308,30 @@ mod tests {
 
     fn uris(v: &[QueuedFetch]) -> Vec<&str> {
         v.iter().map(|q| q.uri.as_str()).collect()
+    }
+
+    /// Another connection holds the write lock while `enqueue` reads, then commits. A deferred
+    /// transaction can't upgrade past that commit and fails with "database is locked" at once
+    /// (an announced delete was lost this way); an immediate one waits for the lock instead.
+    #[test]
+    fn enqueue_waits_for_a_writer_that_commits_meanwhile() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("s.db");
+        Store::open(&path)?.enqueue(&item("seed", FetchReason::Announce, 0), 0, 10)?;
+        let other = rusqlite::Connection::open(&path)?;
+        other.execute_batch("BEGIN IMMEDIATE; DELETE FROM fetch_queue WHERE uri = 'seed';")?;
+        let enqueuer = {
+            let path = path.clone();
+            std::thread::spawn(move || -> Result<EnqueueOutcome, StoreError> {
+                Store::open(&path)?.enqueue(&item("u", FetchReason::Announce, 0), 0, 10)
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        other.execute_batch("COMMIT")?;
+        let outcome = enqueuer.join().map_err(|_| "enqueue thread panicked")?;
+        assert_eq!(outcome?, EnqueueOutcome::Added);
+        assert_eq!(uris(&Store::open(&path)?.next_due(0, 10)?), ["u"]);
+        Ok(())
     }
 
     #[test]
